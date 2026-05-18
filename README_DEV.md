@@ -198,6 +198,141 @@ make test
 
 ---
 
+## Milestone 1B: Ingest Amazon Reviews 2023 subset
+
+The synthetic sample above proves the wiring. This milestone adds the **real Amazon Reviews 2023 adapter** with streaming, brand-allowlist filtering, optional metadata-driven brand resolution, and CLI arguments.
+
+### 1. Place the dataset
+
+`data/` at the project root is gitignored — drop the dataset here:
+
+```
+data/
+  Electronics.jsonl              # or Electronics.jsonl.gz
+  meta_Electronics.jsonl         # optional, used to resolve brand by ASIN
+```
+
+Source: McAuley Lab, UCSD — <https://amazon-reviews-2023.github.io/>
+
+Then in `.env` (copy from `.env.example`):
+
+```
+AMAZON_REVIEWS_PATH=data/Electronics.jsonl
+# AMAZON_METADATA_PATH=data/meta_Electronics.jsonl   # optional
+BRAND_ALLOWLIST=Anker,Soundcore,Bose,JBL,UGREEN,RAVPower,Aukey
+INGEST_LIMIT=50000
+```
+
+### 2. Smoke-test on the committed 20-row fixture (no dataset needed)
+
+```bash
+make ingest-amazon-fixture
+# equivalent:
+# python -m voicelens.pipeline.flows.amazon_ingest_flow \
+#   --input voicelens/data/amazon_reviews_fixture.jsonl
+```
+
+Expected output:
+
+```json
+{
+  "input_rows": 20,
+  "matched_rows": 18,
+  "passed_rows": 12,
+  "failed_rows": 6,
+  "loaded_reviews": 12,
+  "dq_pass_rate": 0.6667,
+  "per_check_failed": {
+    "duplicate_review_id": 2,
+    "invalid_rating": 1,
+    "missing_asin": 1,
+    "text_too_short": 2
+  },
+  "brand_counts": {
+    "Anker": 4, "Soundcore": 3, "Bose": 1, "JBL": 1,
+    "UGREEN": 1, "RAVPower": 1, "Aukey": 1
+  },
+  "top_asin_counts": { "B0SND20001": 3, "B0ANK10001": 2, "...": "..." }
+}
+```
+
+Two rows (`Sony`, `Apple`) are dropped by the brand allowlist; six rows fail various DQ checks (two duplicates, one missing ASIN, one invalid rating, two short text); twelve rows land in Postgres.
+
+### 3. Ingest a real subset
+
+```bash
+make ingest-amazon-sample
+# equivalent:
+# python -m voicelens.pipeline.flows.amazon_ingest_flow
+```
+
+This reads `AMAZON_REVIEWS_PATH` (default `data/Electronics.jsonl`) and respects `INGEST_LIMIT`. If the file does not exist, you get a clear error pointing at `data/README.md`. **No auto-download** — the script will not pull multi-GB files unprompted.
+
+CLI overrides:
+
+```bash
+python -m voicelens.pipeline.flows.amazon_ingest_flow \
+  --input data/Electronics.jsonl.gz \
+  --metadata data/meta_Electronics.jsonl.gz \
+  --brands Anker,Soundcore,Bose,JBL,UGREEN \
+  --limit 50000
+```
+
+### 4. Inspect what loaded
+
+```bash
+make db-stats
+# equivalent: python scripts/db_stats.py
+```
+
+Output (after the 20-row fixture run):
+
+```
+== VoiceLens DB stats ==
+  total_reviews : 12
+  total_brands  : 7
+  total_skus    : 9
+
+-- reviews by brand --
+  Anker            4
+  Soundcore        3
+  ...
+
+-- DQ failures (sum across runs) --
+  duplicate_review_id      2
+  text_too_short           2
+  missing_asin             1
+  invalid_rating           1
+  ...
+
+-- latest ingest_run --
+  id            1
+  source        amazon_reviews_2023
+  status        completed
+  n_rows        12
+```
+
+Raw queries (if Docker compose is up):
+
+```bash
+docker exec -it voicelens-postgres psql -U voicelens -d voicelens -c \
+  "select brand.name, count(*) from review join sku on sku.id=review.sku_id \
+   join brand on brand.id=sku.brand_id group by brand.name order by 2 desc;"
+```
+
+### 5. What the adapter does
+
+- **Streams** JSONL or JSONL.GZ row-by-row (no whole-file load) via `voicelens/ingest/amazon_reviews_2023.py`.
+- **Defensive field mapping**: rating coerced to int via float-then-round; timestamps accept unix-ms or ISO strings; verified flag accepts bool / int / "true"/"false" strings; missing optional fields fall back to safe defaults.
+- **Brand resolution priority**:
+  1. metadata file lookup by ASIN (`store` / `details.Brand` / `details.Manufacturer`)
+  2. inline `brand` / `store` on the review row
+  3. otherwise the row is dropped when an allowlist is active
+- **`canonicalize_brand`** does case-insensitive substring matching so "Anker Innovations" / "ANKER" / "anker direct" all map to `Anker`.
+- **Adapter only filters by brand and limit**; missing ASIN, invalid rating, short text, etc. fall through to the existing DQ layer (same checks as Milestone 0). This keeps a single source of truth for data quality.
+
+---
+
 ## Not yet implemented (intentionally)
 
 - ABSA (LLM aspect extraction).

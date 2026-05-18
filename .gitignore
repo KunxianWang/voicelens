@@ -57,3 +57,8 @@ prefect.db
 
 # Personal study / interview-prep notes (kept local)
 docs/VoiceLens_knowledge_mastery_guide.md
+
+# Large external datasets (user-supplied; not committed)
+data/*
+!data/README.md
+!data/.gitkeep
