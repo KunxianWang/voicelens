@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voicelens"
+version = "0.1.0"
+description = "VoC Data Engineering & Analytics Platform for Cross-Border E-commerce"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "VoiceLens" }]
+license = { text = "MIT" }
+
+dependencies = [
+    "pandas>=2.2",
+    "pydantic>=2.7",
+    "sqlalchemy>=2.0",
+    "psycopg2-binary>=2.9",
+    "prefect>=3.0",
+    "python-dotenv>=1.0",
+    "qdrant-client>=1.10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["voicelens*"]
+exclude = ["voicelens.tests*", "voicelens.data*"]
+
+[tool.setuptools.package-data]
+voicelens = ["data/*.jsonl"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["voicelens/data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["voicelens/tests"]
+pythonpath = ["."]
+addopts = "-ra"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Local secrets (keep .env.example committed)
+.env
+.env.*
+!.env.example
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+voicelens_smoke.db
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Obsidian / personal note-taking
+.obsidian/
+
+# Claude Code local settings (do not share secrets / paths)
+.claude/
+
+# Prefect
+.prefect/
+prefect.db
+
+# Personal study / interview-prep notes (kept local)
+docs/VoiceLens_knowledge_mastery_guide.md
