@@ -19,6 +19,11 @@ DATABASE_URL: str = _env(
     "postgresql+psycopg2://voicelens:voicelens@localhost:5432/voicelens",
 )
 QDRANT_URL: str = _env("QDRANT_URL", "http://localhost:6333")
+QDRANT_COLLECTION: str = _env("QDRANT_COLLECTION", "reviews_v2")
+
+EMBEDDING_PROVIDER: str = _env("EMBEDDING_PROVIDER", "mock")
+EMBEDDING_MODEL: str = _env("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+EMBEDDING_BATCH_SIZE: int = int(_env("EMBEDDING_BATCH_SIZE", "64"))
 
 
 def _resolve(path_str: str) -> Path:

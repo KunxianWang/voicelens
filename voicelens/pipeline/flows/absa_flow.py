@@ -290,6 +290,16 @@ def _summary_skeleton() -> dict[str, Any]:
         "aspect_counts": {},
         "sentiment_counts": {},
         "severity_counts": {},
+        # ``raw_output_evidence_verbatim_rate`` is the fraction of raw
+        # aspect candidates emitted by the provider whose evidence_quote
+        # passed the verbatim-substring check. Mentions that fail this
+        # check are dropped before insertion, so the validated table's
+        # rate (``valid_mention_evidence_verbatim_rate`` in absa_stats)
+        # is always 1.0 by construction. The two metrics are intentionally
+        # named distinctly so dashboards don't conflate them.
+        "raw_output_evidence_verbatim_rate": 0.0,
+        # Legacy alias; will be removed in M4. Kept so older summaries
+        # parsed by notebooks / CI continue to read.
         "evidence_verbatim_rate": 0.0,
         "validation_errors": {
             ERR_SCHEMA: 0,
@@ -613,9 +623,13 @@ def absa_flow(
             session.flush()
 
     non_verbatim = summary["validation_errors"].get(ERR_NON_VERBATIM, 0)
-    summary["evidence_verbatim_rate"] = (
+    raw_verbatim_rate = (
         round((raw_quote_total - non_verbatim) / raw_quote_total, 4) if raw_quote_total else 1.0
     )
+    summary["raw_output_evidence_verbatim_rate"] = raw_verbatim_rate
+    # Back-compat alias — see comment on the legacy key in
+    # ``_summary_skeleton``.
+    summary["evidence_verbatim_rate"] = raw_verbatim_rate
     summary["aspect_counts"] = dict(aspect_counts.most_common())
     summary["sentiment_counts"] = dict(sentiment_counts.most_common())
     summary["severity_counts"] = dict(severity_counts.most_common())

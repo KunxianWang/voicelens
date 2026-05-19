@@ -26,6 +26,12 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.5",
 ]
+retrieval = [
+    # Used by LocalEmbeddingProvider. Pulls torch transitively. Kept as
+    # an optional extra so the base install stays lightweight and the
+    # mock-embedding test path doesn't drag torch into CI.
+    "sentence-transformers>=3.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

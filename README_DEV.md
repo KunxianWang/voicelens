@@ -1113,10 +1113,158 @@ pass `--aspect-version v2` by default. Override with
 
 ---
 
+## Milestone 3A: Embeddings + Qdrant indexing
+
+Wires up the retrieval surface: embed the ABSA-processed v2 review
+subset, upsert into Qdrant, smoke-test with a few NL queries. This is
+**retrieval infrastructure**, not the full RAG layer — LangGraph,
+self-query rewriting, and the cited-answer node remain scoped to a
+later milestone.
+
+### Why only the ABSA-processed subset
+
+- We want every Qdrant point to carry a structured payload
+  (`aspect_codes`, `sentiments`, `severities`, `evidence_quotes`) so
+  search results can be filtered by aspect or sentiment without
+  re-running the LLM at query time.
+- Reviews under `ABSAReviewStatus.status in (success, no_mentions)`
+  have a known-quality fingerprint; `failed` and `invalid` rows have
+  unreliable evidence and are excluded by default. `--statuses` opts
+  failed/invalid back in for forensic re-indexing.
+- The retrieval flow is keyed on
+  `(review_id, aspect_version, provider, model_name)` via a stable
+  UUIDv5 point id, so re-running upserts in place rather than
+  duplicating.
+
+### 1. Start Qdrant
+
+`make up` brings Qdrant up alongside Postgres via the existing
+`ops/docker/compose.yaml`. Default URL is `http://localhost:6333`.
+Tests use Qdrant's in-memory mode and do not require a running server.
+
+### 2. Smoke the indexing flow with mock embeddings
+
+```bash
+make embed-mock-smoke
+# equivalent:
+# python -m voicelens.pipeline.flows.embed_flow \
+#   --aspect-version v2 --provider anthropic --model claude-opus-4.6 \
+#   --embedding-provider mock --collection reviews_v2_mock_smoke \
+#   --qdrant-url :memory: --limit 10
+```
+
+`MockEmbeddingProvider` is deterministic and dependency-free
+(SHA-256 → length-32 unit vector). Use this to confirm the pipeline
+plumbing without pulling in sentence-transformers or hitting a real
+Qdrant.
+
+### 3. Index the v2 ABSA-processed subset with local embeddings
+
+```bash
+make embed-v2-1k
+# equivalent:
+# python -m voicelens.pipeline.flows.embed_flow \
+#   --aspect-version v2 --provider anthropic --model claude-opus-4.6 \
+#   --embedding-provider local --embedding-model BAAI/bge-small-en-v1.5 \
+#   --collection reviews_v2 --limit 1000
+```
+
+Default embedding model is `BAAI/bge-small-en-v1.5` (384 dims,
+sentence-transformers). `bge-m3` is the post-MVP target; small was
+picked deliberately for laptop-grade local runs.
+
+Override with env vars (or Make variables):
+
+```
+EMBEDDING_PROVIDER=local
+EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+QDRANT_COLLECTION=reviews_v2
+EMBEDDING_BATCH_SIZE=64
+```
+
+Expected JSON summary fields:
+
+```
+selected_reviews          how many review rows matched (aspect_version, provider, model_name)
+embedded_reviews          rows actually embedded (= selected after any limit)
+upserted_points           confirmed by Qdrant
+skipped_failed_or_invalid status rows that matched the keys but were not success/no_mentions
+collection                Qdrant collection name
+embedding_provider        e.g. local:BAAI/bge-small-en-v1.5
+embedding_model           model id reported by the provider
+vector_size               inferred from the provider; pinned for the collection's lifetime
+```
+
+### 4. Inspect what landed
+
+```bash
+make qdrant-stats
+# python scripts/qdrant_stats.py --collection reviews_v2
+```
+
+Reports `point_count`, `vector_size`, scanned aspect / sentiment /
+severity / brand distributions over the payload, plus the first 3
+payloads as a sanity sample.
+
+### 5. Retrieval smoke (try a few queries)
+
+```bash
+make retrieval-smoke
+# python scripts/retrieval_smoke.py --query "..." --limit 5
+```
+
+Useful free-form queries that exercise the v2 ontology:
+
+```bash
+python scripts/retrieval_smoke.py --query "product stopped working after a week" --limit 5
+python scripts/retrieval_smoke.py --query "bluetooth disconnects" --aspect bluetooth --limit 5
+python scripts/retrieval_smoke.py --query "expensive / not worth the price" --aspect price --sentiment negative --limit 5
+python scripts/retrieval_smoke.py --query "arrived damaged" --aspect delivery --limit 5
+```
+
+Filters available on the smoke CLI:
+
+```
+--brand            string match on payload.brand
+--asin             string match on payload.asin
+--aspect           ANY-of match on payload.aspect_codes
+--sentiment        ANY-of match on payload.sentiments
+--rating-min N     half-open range on rating
+--rating-max N
+--aspect-version   keep retrieval honest about which ontology version was indexed
+--absa-provider    distinguish providers when multiple were indexed side-by-side
+--absa-model
+--absa-status      success | no_mentions
+```
+
+The smoke prints one block per hit: cosine score, review_id, brand,
+asin, rating, aspect tags, a 220-char snippet, and the first two
+evidence quotes.
+
+### 6. What this is NOT
+
+- This is **not** the RAG layer. Queries here are not rewritten by an
+  LLM (no self-query); the citation / cited-answer / 3-node LangGraph
+  supervisor lands in M3B.
+- BERTopic clustering, EWMA anomaly detection, the Streamlit
+  dashboard, and the full 245k pass all remain explicitly out of M3A.
+
+### Metric naming clean-up bundled with M3A
+
+`absa_stats` now emits `valid_mention_evidence_verbatim_rate`
+(the rate among inserted mentions; always 1.0 by construction since
+non-verbatim quotes are dropped during validation). The matching
+"raw output" rate is on the per-run `absa_flow` summary under
+`raw_output_evidence_verbatim_rate` (fraction of raw aspect
+candidates that passed the verbatim check). The legacy
+`evidence_verbatim_rate` key is kept as an alias on both surfaces
+so existing notebooks / CI continue to read.
+
+---
+
 ## Not yet implemented (intentionally)
 
 - Real-LLM ABSA over the full 245k MVP subset.
-- Embeddings + Qdrant indexing.
 - BERTopic clustering.
 - EWMA anomaly detection.
 - LangGraph agent / RAG query layer.

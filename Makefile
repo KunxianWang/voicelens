@@ -5,6 +5,7 @@
         seed-aspects absa-smoke absa-stats sample-absa-holdout \
         absa-llm-smoke absa-llm-1k absa-llm-holdout-50 export-absa-predictions evaluate-absa \
         validate-absa-labels evaluate-absa-50 export-absa-errors \
+        embed-mock-smoke embed-v2-1k retrieval-smoke qdrant-stats \
         test lint install
 
 PYTHON ?= python
@@ -12,6 +13,9 @@ ABSA_LLM_PROVIDER ?= anthropic
 ABSA_MODEL ?= claude-opus-4.6
 ABSA_MAX_COST_USD ?= 5
 ABSA_ASPECT_VERSION ?= v2
+QDRANT_COLLECTION ?= reviews_v2
+EMBEDDING_PROVIDER ?= local
+EMBEDDING_MODEL ?= BAAI/bge-small-en-v1.5
 
 help:
 	@echo "Targets:"
@@ -41,6 +45,10 @@ help:
 	@echo "  validate-absa-labels     schema-check data/labeling/absa_holdout_labeled.jsonl"
 	@echo "  evaluate-absa-50         partial-eval: only first 50 labeled rows"
 	@echo "  export-absa-errors       export per-(review,aspect) error CSV for human review"
+	@echo "  embed-mock-smoke         tiny mock-embedding indexing run (no network, in-memory Qdrant)"
+	@echo "  embed-v2-1k              embed up to 1000 v2 ABSA-processed reviews into Qdrant"
+	@echo "  retrieval-smoke          run a sample query against the Qdrant collection"
+	@echo "  qdrant-stats             print collection size + aspect/sentiment distributions"
 	@echo "  db-stats                 print review / brand / rating / DQ counts"
 	@echo "  test                     run pytest (uses SQLite in-memory)"
 	@echo "  lint                     ruff check"
@@ -160,6 +168,36 @@ sample-absa-holdout:
 
 export-absa-predictions:
 	$(PYTHON) scripts/export_absa_predictions_for_labeling.py --model "$(ABSA_MODEL)" --aspect-version "$(ABSA_ASPECT_VERSION)"
+
+embed-mock-smoke:
+	$(PYTHON) -m voicelens.pipeline.flows.embed_flow \
+	  --aspect-version "$(ABSA_ASPECT_VERSION)" \
+	  --provider "$(ABSA_LLM_PROVIDER)" \
+	  --model "$(ABSA_MODEL)" \
+	  --embedding-provider mock \
+	  --collection reviews_v2_mock_smoke \
+	  --qdrant-url :memory: \
+	  --limit 10
+
+embed-v2-1k:
+	$(PYTHON) -m voicelens.pipeline.flows.embed_flow \
+	  --aspect-version "$(ABSA_ASPECT_VERSION)" \
+	  --provider "$(ABSA_LLM_PROVIDER)" \
+	  --model "$(ABSA_MODEL)" \
+	  --embedding-provider "$(EMBEDDING_PROVIDER)" \
+	  --embedding-model "$(EMBEDDING_MODEL)" \
+	  --collection "$(QDRANT_COLLECTION)" \
+	  --limit 1000
+
+qdrant-stats:
+	$(PYTHON) scripts/qdrant_stats.py --collection "$(QDRANT_COLLECTION)"
+
+retrieval-smoke:
+	$(PYTHON) scripts/retrieval_smoke.py \
+	  --collection "$(QDRANT_COLLECTION)" \
+	  --embedding-provider "$(EMBEDDING_PROVIDER)" \
+	  --embedding-model "$(EMBEDDING_MODEL)" \
+	  --query "product stopped working after a week" --limit 5
 
 evaluate-absa:
 	$(PYTHON) scripts/evaluate_absa.py

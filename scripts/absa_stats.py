@@ -65,9 +65,20 @@ def collect_absa_stats() -> dict:
             ):
                 if quote and text and quote in text:
                     verbatim_hits += 1
-        out["evidence_verbatim_rate"] = (
-            round(verbatim_hits / total_mentions, 4) if total_mentions else 1.0
-        )
+        # ``valid_mention_evidence_verbatim_rate`` is computed over rows
+        # that already survived validation (i.e. inserted ``aspect_mention``
+        # rows). The validator drops non-verbatim quotes before insert, so
+        # this should be 1.0 in practice — the rate is reported anyway
+        # because it doubles as a self-consistency check on the validator.
+        # For the "raw-output" view of verbatim rate (i.e. what fraction of
+        # the LLM's raw aspects passed the verbatim check), see the
+        # ``raw_output_evidence_verbatim_rate`` field on absa_flow's
+        # per-run JSON summary.
+        valid_rate = round(verbatim_hits / total_mentions, 4) if total_mentions else 1.0
+        out["valid_mention_evidence_verbatim_rate"] = valid_rate
+        # Legacy alias for older dashboards / notebooks that read the
+        # original key. Will be removed in M4 once nothing reads it.
+        out["evidence_verbatim_rate"] = valid_rate
 
         aspect_rows = s.execute(
             select(AspectOntology.code, func.count(AspectMention.id))
@@ -119,7 +130,7 @@ def _print(stats: dict) -> None:
     print(f"  failed_reviews           : {stats['failed_reviews']}")
     print(f"  processed_coverage_rate  : {stats['processed_coverage_rate']}")
     print(f"  mention_coverage_rate    : {stats['mention_coverage_rate']}")
-    print(f"  evidence_verbatim_rate   : {stats['evidence_verbatim_rate']}")
+    print(f"  valid_mention_evidence_verbatim_rate : {stats['valid_mention_evidence_verbatim_rate']}")
 
     print("\n-- aspect distribution --")
     if stats["aspect_distribution"]:
