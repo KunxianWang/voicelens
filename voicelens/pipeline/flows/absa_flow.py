@@ -30,6 +30,7 @@ import logging
 import sys
 from collections import Counter
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 from prefect import flow, get_run_logger
@@ -74,6 +75,92 @@ def _load_ontology(session: Session, version: str) -> dict[str, int]:
     return {row.code: row.id for row in rows}
 
 
+def _read_review_ids_file(path: str | Path) -> tuple[list[int], list[str]]:
+    """Read a JSONL file and return ``(review_ids, source_ids)`` lists.
+
+    Each line is a JSON object. ``review_id`` is preferred; if missing, the
+    row's ``source_id`` is collected as a fallback resolver in the DB. Lines
+    without either field are skipped. Order is preserved and duplicates
+    are de-duplicated while keeping first occurrence.
+    """
+    review_ids: list[int] = []
+    source_ids: list[str] = []
+    seen_rids: set[int] = set()
+    seen_sids: set[str] = set()
+    with open(path, encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"--review-ids-file {path}:{line_no} is not valid JSON: {exc}"
+                ) from exc
+            if not isinstance(row, dict):
+                continue
+            rid = row.get("review_id")
+            if rid is not None:
+                try:
+                    rid_int = int(rid)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"--review-ids-file {path}:{line_no} has non-int review_id={rid!r}"
+                    ) from exc
+                if rid_int not in seen_rids:
+                    review_ids.append(rid_int)
+                    seen_rids.add(rid_int)
+                continue
+            sid = row.get("source_id")
+            if isinstance(sid, str) and sid and sid not in seen_sids:
+                source_ids.append(sid)
+                seen_sids.add(sid)
+    if not review_ids and not source_ids:
+        raise ValueError(
+            f"--review-ids-file {path} contained no review_id or source_id entries"
+        )
+    return review_ids, source_ids
+
+
+def _resolve_review_ids(
+    session: Session, review_ids: list[int], source_ids: list[str]
+) -> tuple[list[int], list[str]]:
+    """Resolve a ``(review_ids, source_ids)`` selection against ``Review``.
+
+    Returns ``(found_ids, missing_descriptions)``. ``found_ids`` is the set
+    of ``Review.id`` values that exist in the database; ``missing_descriptions``
+    lists the raw selectors that could not be resolved (e.g. a source_id
+    that doesn't match any review).
+    """
+    found: list[int] = []
+    missing: list[str] = []
+    if review_ids:
+        existing = set(
+            session.execute(
+                select(Review.id).where(Review.id.in_(review_ids))
+            ).scalars()
+        )
+        for rid in review_ids:
+            if rid in existing:
+                found.append(rid)
+            else:
+                missing.append(f"review_id={rid}")
+    if source_ids:
+        rows = session.execute(
+            select(Review.id, Review.source_id).where(Review.source_id.in_(source_ids))
+        ).all()
+        by_sid = {row.source_id: int(row.id) for row in rows}
+        for sid in source_ids:
+            rid = by_sid.get(sid)
+            if rid is None:
+                missing.append(f"source_id={sid!r}")
+                continue
+            if rid not in found:
+                found.append(rid)
+    return found, missing
+
+
 def _select_review_ids(
     session: Session,
     *,
@@ -83,6 +170,7 @@ def _select_review_ids(
     model_name: str,
     limit: int | None,
     force: bool,
+    explicit_review_ids: list[int] | None = None,
 ) -> list[int]:
     """Resolve which Review rows still need ABSA processing.
 
@@ -90,8 +178,38 @@ def _select_review_ids(
     ``absa_review_status`` row for the same
     ``(aspect_version, provider, model_name)`` — regardless of whether the
     prior run produced mentions or zero. With ``--force``: process
-    everything matching the source filter.
+    everything matching the source filter (or ``explicit_review_ids``).
+
+    When ``explicit_review_ids`` is provided (from ``--review-ids-file``),
+    the source filter is ignored and the input list is used as the
+    candidate set. Order from the input list is preserved (not by
+    ``Review.id``) so callers control the processing order. The
+    idempotency and ``--force`` semantics are unchanged.
     """
+    if explicit_review_ids is not None:
+        if not explicit_review_ids:
+            return []
+        if force:
+            return list(explicit_review_ids[:limit] if limit and limit > 0 else explicit_review_ids)
+        already = set(
+            session.execute(
+                select(ABSAReviewStatus.review_id)
+                .where(
+                    and_(
+                        ABSAReviewStatus.aspect_version == aspect_version,
+                        ABSAReviewStatus.provider == provider_name,
+                        ABSAReviewStatus.model_name == model_name,
+                        ABSAReviewStatus.review_id.in_(explicit_review_ids),
+                    )
+                )
+                .distinct()
+            ).scalars()
+        )
+        out = [rid for rid in explicit_review_ids if rid not in already]
+        if limit is not None and limit > 0:
+            out = out[:limit]
+        return out
+
     stmt = select(Review.id).order_by(Review.id)
     if source is not None:
         stmt = stmt.where(
@@ -302,6 +420,7 @@ def absa_flow(
     llm_max_retries: int = 2,
     llm_retry_base_seconds: float = 1.0,
     min_processed_for_rate_guardrail: int = 50,
+    review_ids_file: str | Path | None = None,
 ) -> dict[str, Any]:
     try:
         logger = get_run_logger()
@@ -324,6 +443,24 @@ def absa_flow(
         ontology = _load_ontology(session, aspect_version)
         ontology_codes = tuple(ontology.keys()) or ONTOLOGY_CODES_V1
 
+        explicit_ids: list[int] | None = None
+        if review_ids_file is not None:
+            raw_review_ids, raw_source_ids = _read_review_ids_file(review_ids_file)
+            resolved_ids, missing = _resolve_review_ids(
+                session, raw_review_ids, raw_source_ids
+            )
+            if missing:
+                logger.warning(
+                    "absa_flow: %d entries in --review-ids-file could not be resolved "
+                    "(first 5: %s)",
+                    len(missing), missing[:5],
+                )
+            summary["review_ids_file"] = str(review_ids_file)
+            summary["review_ids_file_requested"] = len(raw_review_ids) + len(raw_source_ids)
+            summary["review_ids_file_resolved"] = len(resolved_ids)
+            summary["review_ids_file_unresolved"] = len(missing)
+            explicit_ids = resolved_ids
+
         review_ids = _select_review_ids(
             session,
             source=source,
@@ -332,6 +469,7 @@ def absa_flow(
             model_name=model_name,
             limit=limit,
             force=force,
+            explicit_review_ids=explicit_ids,
         )
         summary["input_reviews"] = len(review_ids)
         if not review_ids:
@@ -508,6 +646,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--stop-on-guardrail", dest="stop_on_guardrail", action="store_true", default=True, help="Stop processing when a guardrail is exceeded")
     parser.add_argument("--no-stop-on-guardrail", dest="stop_on_guardrail", action="store_false", help="Record guardrail breach but continue processing")
     parser.add_argument("--force", action="store_true", help="Reprocess reviews even if they already have a status row for this provider+version")
+    parser.add_argument(
+        "--review-ids-file",
+        default=None,
+        help=(
+            "Path to a JSONL file whose rows carry review_id (preferred) or source_id. "
+            "When set, --source is ignored and only the listed reviews are processed."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -528,6 +674,7 @@ def main(argv: list[str] | None = None) -> int:
         llm_max_retries=args.llm_max_retries,
         llm_retry_base_seconds=args.llm_retry_base_seconds,
         min_processed_for_rate_guardrail=args.min_processed_for_rate_guardrail,
+        review_ids_file=args.review_ids_file,
     )
     print(json.dumps(summary, indent=2, sort_keys=True, ensure_ascii=False))
     return 0

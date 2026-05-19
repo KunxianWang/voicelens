@@ -902,6 +902,143 @@ Do not scale beyond the 1k batch until these metrics and the API bill look accep
 
 ---
 
+## Milestone 2C: ABSA evaluation workflow and prompt calibration prep
+
+The 1000-row labeled holdout is hours of manual work. M2C makes the
+labeling → evaluation → prompt-iteration loop tight enough to run in
+50-row increments, so the labeler sees evaluation numbers before
+finishing the full 1k. The flow is:
+
+1. Label the first ~50 rows.
+2. Run `make validate-absa-labels` — schema-check the file.
+3. Run `make evaluate-absa-50` — partial eval over the labeled subset.
+4. Run `make export-absa-errors` — get a CSV of per-aspect mistakes for human review.
+5. Adjust the prompt or label more rows. Repeat. Promote to the full 1k
+   once metrics on 50 / 100 / 200 rows look stable.
+
+### 1. Start labeling
+
+Copy the seed scaffold and start filling `gold_aspects`:
+
+```bash
+cp data/labeling/absa_holdout_seed.jsonl data/labeling/absa_holdout_labeled.jsonl
+# edit data/labeling/absa_holdout_labeled.jsonl in your editor
+```
+
+Each labeled row's `gold_aspects` list follows the same schema the LLM is
+held to:
+
+```json
+{
+  "aspect_code": "battery",     // one of the 7 v1 codes
+  "sentiment": "negative",      // positive | neutral | negative
+  "severity": "medium",         // required iff sentiment == "negative", else null
+  "evidence_quote": "..."       // verbatim substring of text_raw
+}
+```
+
+For reviews you confirmed have NO in-ontology aspects, set
+`"labeled": true` on the row and leave `gold_aspects: []`. The validator
+and partial-eval treat that as a labeled row (sentiment ground truth =
+"no aspect" — surfaces extra_aspect errors in the export).
+
+### 2. Validate labels before evaluating
+
+```bash
+make validate-absa-labels
+# equivalent: python scripts/validate_absa_labels.py
+```
+
+Catches: bad aspect codes, missing/extra severity, non-verbatim evidence,
+duplicate aspect_code per review, malformed JSON. Exits non-zero if any
+row fails, so this slots into CI before any evaluation runs.
+
+Expected output (after labeling ~40 rows):
+
+```
+== validate_absa_labels.py: data/labeling/absa_holdout_labeled.jsonl ==
+  total_rows         : 200
+  labeled_rows       : 40
+  unlabeled_rows     : 160
+  invalid_rows       : 0
+-- aspect distribution (labeled) --
+  battery          12
+  charging         10
+  ...
+-- sentiment distribution (labeled) --
+  negative         18
+  positive         11
+  neutral          11
+-- severity distribution (labeled, negative-only) --
+  low              9
+  medium           6
+  high             3
+```
+
+### 3. Partial evaluation
+
+```bash
+make evaluate-absa-50
+# equivalent:
+python scripts/evaluate_absa.py --max-rows 50 --require-min-labeled 20
+```
+
+- `--max-rows 50` caps the labeled subset at the first 50 rows
+  (post-filter). Use to keep eval fast while still labeling.
+- `--require-min-labeled 20` (default) prints a clear error and exits
+  non-zero if fewer than 20 rows are labeled — prevents misleading
+  metrics from tiny samples. Set to `0` to bypass.
+
+Metrics include the M2B numbers plus three new fields:
+`evaluated_rows`, `unlabeled_rows_skipped`, `total_rows_in_file`.
+
+### 4. Error CSV for human review
+
+```bash
+make export-absa-errors
+# equivalent: python scripts/export_absa_eval_errors.py
+```
+
+Writes `data/labeling/absa_eval_errors.csv` with one row per
+`(review, aspect_code)` discrepancy. Columns:
+
+```
+review_id, brand, rating, text_raw, aspect_code,
+gold_aspects, predicted_aspects, error_type, notes
+```
+
+`error_type` is one of:
+
+| error_type | meaning |
+|---|---|
+| `missed_aspect` | gold has the aspect; predictions don't |
+| `extra_aspect` | predictions have the aspect; gold doesn't |
+| `non_verbatim_evidence` | predicted evidence_quote is not a substring of `text_raw` |
+| `wrong_sentiment` | aspect matches; sentiment disagrees |
+| `wrong_severity` | aspect + sentiment match; severity disagrees on a negative |
+| `correct` | every aspect matches; one summary row per fully-correct review |
+
+The CSV opens cleanly in Excel/Numbers/Google Sheets — sort by
+`error_type` to spot prompt failure modes (e.g. "the LLM keeps adding
+`price` mentions when the reviewer just said the price was fine").
+
+### 5. When is it safe to run the full 1k?
+
+Promote from partial → 1k when ALL of these are true:
+
+- `make validate-absa-labels` passes (zero invalid rows).
+- `make evaluate-absa-50` reports `macro_f1 ≥ 0.65` and
+  `sentiment_cohens_kappa ≥ 0.60` (the MVP gates from
+  `design/04-mvp-spec.md` §9.1).
+- `evidence_quote_verbatim_rate ≥ 0.98`.
+- The error CSV does not show a single dominant failure mode — if 20+
+  rows are all the same `wrong_sentiment` pattern, fix the prompt
+  before spending API budget on the remaining 950 reviews.
+
+Below those bars, label more rows and iterate the prompt instead.
+
+---
+
 ## Not yet implemented (intentionally)
 
 - Real-LLM ABSA over the full 245k MVP subset.

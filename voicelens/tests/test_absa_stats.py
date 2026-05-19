@@ -5,9 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from scripts.absa_stats import collect_absa_stats
 from scripts.seed_aspect_ontology import seed_aspect_ontology
 from voicelens.pipeline.flows.absa_flow import absa_flow
-
-# Reuse the review-seeding helper from the flow test module.
-from voicelens.tests.test_absa_flow import _seed_reviews
+from voicelens.tests._absa_fixture import seed_reviews as _seed_reviews
 
 
 def test_absa_stats_on_empty_db(fresh_engine):

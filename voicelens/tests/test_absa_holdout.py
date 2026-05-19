@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 
 from scripts.sample_absa_holdout import sample_holdout, write_seed
 from scripts.seed_aspect_ontology import seed_aspect_ontology
-from voicelens.tests.test_absa_flow import _seed_reviews
+from voicelens.tests._absa_fixture import seed_reviews as _seed_reviews
 
 
 def test_holdout_sample_is_deterministic(fresh_engine):

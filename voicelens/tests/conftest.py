@@ -69,3 +69,24 @@ def sample_row_factory():
         base.update(overrides)
         return base
     return _make
+
+
+@pytest.fixture
+def seeded_engine(fresh_engine):
+    """Shared ABSA fixture: seeds aspect_ontology v1 + a small review set.
+
+    Used by every test module that needs a populated DB to run ``absa_flow``
+    against. The seed helper and review constants live in
+    ``voicelens.tests._absa_fixture`` so this fixture stays a thin wrapper.
+    """
+    from sqlalchemy.orm import sessionmaker
+
+    from scripts.seed_aspect_ontology import seed_aspect_ontology
+    from voicelens.tests._absa_fixture import seed_reviews
+
+    SessionLocal = sessionmaker(bind=fresh_engine, expire_on_commit=False, future=True)
+    with SessionLocal() as s:
+        seed_aspect_ontology(s)
+        review_ids = seed_reviews(s)
+        s.commit()
+    yield fresh_engine, review_ids

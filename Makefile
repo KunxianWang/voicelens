@@ -3,7 +3,8 @@
         scan-amazon-brands scan-amazon-brand-reviews generate-brand-allowlist profile-amazon-dataset \
         build-mvp-subset ingest-mvp-subset \
         seed-aspects absa-smoke absa-stats sample-absa-holdout \
-        absa-llm-smoke absa-llm-1k export-absa-predictions evaluate-absa \
+        absa-llm-smoke absa-llm-1k absa-llm-holdout-50 export-absa-predictions evaluate-absa \
+        validate-absa-labels evaluate-absa-50 export-absa-errors \
         test lint install
 
 PYTHON ?= python
@@ -31,10 +32,14 @@ help:
 	@echo "  absa-smoke               run absa_flow with MockABSAProvider on first 500 MVP-subset reviews"
 	@echo "  absa-llm-smoke           run real LLM ABSA on 100 MVP-subset reviews"
 	@echo "  absa-llm-1k              run real LLM ABSA on 1000 MVP-subset reviews"
+	@echo "  absa-llm-holdout-50      run real LLM ABSA on review_ids listed in absa_holdout_labeled.jsonl"
 	@echo "  absa-stats               print aspect_mention coverage / distribution / verbatim rate"
 	@echo "  sample-absa-holdout      write data/labeling/absa_holdout_seed.jsonl for manual labeling"
 	@echo "  export-absa-predictions  write data/labeling/absa_holdout_predictions.jsonl"
 	@echo "  evaluate-absa            score labeled holdout against predictions"
+	@echo "  validate-absa-labels     schema-check data/labeling/absa_holdout_labeled.jsonl"
+	@echo "  evaluate-absa-50         partial-eval: only first 50 labeled rows"
+	@echo "  export-absa-errors       export per-(review,aspect) error CSV for human review"
 	@echo "  db-stats                 print review / brand / rating / DQ counts"
 	@echo "  test                     run pytest (uses SQLite in-memory)"
 	@echo "  lint                     ruff check"
@@ -131,6 +136,18 @@ absa-llm-1k:
 	  --max-fail-rate 0.05 \
 	  --max-cost-usd "$(ABSA_MAX_COST_USD)"
 
+absa-llm-holdout-50:
+	$(PYTHON) -m voicelens.pipeline.flows.absa_flow \
+	  --review-ids-file data/labeling/absa_holdout_labeled.jsonl \
+	  --provider "$(ABSA_LLM_PROVIDER)" \
+	  --model "$(ABSA_MODEL)" \
+	  --llm-max-retries 2 \
+	  --llm-retry-base-seconds 1.0 \
+	  --min-processed-for-rate-guardrail 20 \
+	  --max-invalid-rate 0.05 \
+	  --max-fail-rate 0.10 \
+	  --max-cost-usd 1
+
 absa-stats:
 	$(PYTHON) scripts/absa_stats.py
 
@@ -142,6 +159,15 @@ export-absa-predictions:
 
 evaluate-absa:
 	$(PYTHON) scripts/evaluate_absa.py
+
+validate-absa-labels:
+	$(PYTHON) scripts/validate_absa_labels.py
+
+evaluate-absa-50:
+	$(PYTHON) scripts/evaluate_absa.py --max-rows 50 --require-min-labeled 20
+
+export-absa-errors:
+	$(PYTHON) scripts/export_absa_eval_errors.py
 
 test:
 	$(PYTHON) -m pytest
