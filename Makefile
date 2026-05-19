@@ -1,5 +1,7 @@
 .PHONY: help up down init-db seed ingest-sample \
         ingest-amazon-fixture ingest-amazon-sample db-stats \
+        scan-amazon-brands scan-amazon-brand-reviews generate-brand-allowlist profile-amazon-dataset \
+        build-mvp-subset ingest-mvp-subset \
         test lint install
 
 PYTHON ?= python
@@ -14,6 +16,12 @@ help:
 	@echo "  ingest-sample            run ingest_flow on synthetic sample"
 	@echo "  ingest-amazon-fixture    run amazon_ingest_flow on the 20-row committed fixture"
 	@echo "  ingest-amazon-sample     run amazon_ingest_flow on \$$AMAZON_REVIEWS_PATH (real subset)"
+	@echo "  scan-amazon-brands       scan metadata for candidate brand availability"
+	@echo "  scan-amazon-brand-reviews join reviews to metadata brand map and count reviews"
+	@echo "  generate-brand-allowlist write data/resolved_brand_allowlist.json from scan outputs"
+	@echo "  profile-amazon-dataset   write data/dataset_profile.json from metadata + reviews"
+	@echo "  build-mvp-subset         build deterministic Amazon MVP subset JSONL.GZ"
+	@echo "  ingest-mvp-subset        ingest data/amazon_mvp_reviews.jsonl.gz into Postgres"
 	@echo "  db-stats                 print review / brand / rating / DQ counts"
 	@echo "  test                     run pytest (uses SQLite in-memory)"
 	@echo "  lint                     ruff check"
@@ -48,6 +56,29 @@ ingest-amazon-sample:
 	  exit 1; \
 	fi
 	$(PYTHON) -m voicelens.pipeline.flows.amazon_ingest_flow
+
+scan-amazon-brands:
+	$(PYTHON) -m voicelens.ingest.brand_scan
+
+scan-amazon-brand-reviews:
+	$(PYTHON) -m voicelens.ingest.brand_review_scan $(if $(LIMIT),--limit $(LIMIT),--full-scan)
+
+generate-brand-allowlist:
+	$(PYTHON) scripts/generate_brand_allowlist.py
+
+profile-amazon-dataset:
+	$(PYTHON) scripts/profile_dataset.py --write $(if $(LIMIT),--limit $(LIMIT),--full-scan)
+
+build-mvp-subset:
+	$(PYTHON) scripts/build_mvp_subset.py
+
+ingest-mvp-subset:
+	$(PYTHON) -m voicelens.pipeline.flows.amazon_ingest_flow \
+	  --input data/amazon_mvp_reviews.jsonl.gz \
+	  --metadata data/meta_Electronics.jsonl.gz \
+	  --brands-file data/resolved_brand_allowlist.json \
+	  --no-limit \
+	  --source amazon_reviews_2023_mvp_subset
 
 db-stats:
 	$(PYTHON) scripts/db_stats.py

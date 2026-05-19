@@ -125,7 +125,7 @@ Prefect 3, one Docker container in MVP. Medallion-layered: **Bronze** (raw, appe
 [Amazon Reviews 2023 jsonl]
         │
         ▼
-   ingest_flow         brand allowlist filter; partition by brand/month → bronze parquet
+   ingest_flow         resolved brand allowlist filter; partition by brand/month → bronze parquet
         │
         ▼
    dq_flow             quality gates (§5.1); rejects to dead-letter; metrics emitted

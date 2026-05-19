@@ -37,9 +37,14 @@ AMAZON_REVIEWS_PATH: Path = _resolve(_env("AMAZON_REVIEWS_PATH", "data/Electroni
 _amazon_metadata_path_str = _env("AMAZON_METADATA_PATH", "")
 AMAZON_METADATA_PATH: Path | None = _resolve(_amazon_metadata_path_str) if _amazon_metadata_path_str else None
 
+BRAND_CANDIDATES: tuple[str, ...] = tuple(
+    b.strip()
+    for b in _env("BRAND_CANDIDATES", "Anker,Soundcore,Bose,JBL,UGREEN,RAVPower,Aukey").split(",")
+    if b.strip()
+)
 BRAND_ALLOWLIST: tuple[str, ...] = tuple(
     b.strip()
-    for b in _env("BRAND_ALLOWLIST", "Anker,Soundcore,Bose,JBL,UGREEN,RAVPower,Aukey").split(",")
+    for b in _env("BRAND_ALLOWLIST", ",".join(BRAND_CANDIDATES)).split(",")
     if b.strip()
 )
 INGEST_LIMIT: int = int(_env("INGEST_LIMIT", "50000"))

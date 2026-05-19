@@ -15,12 +15,25 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import re
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from voicelens.ingest.brand_scan import choose_best_brand, match_candidate_brands
+
 logger = logging.getLogger(__name__)
+
+BRAND_ALIASES: dict[str, tuple[str, ...]] = {
+    "Anker": ("anker", "anker innovations", "ankerdirect", "anker direct"),
+    "Soundcore": ("soundcore", "soundcore by anker"),
+    "Bose": ("bose",),
+    "JBL": ("jbl",),
+    "UGREEN": ("ugreen",),
+    "RAVPower": ("ravpower", "rav power"),
+    "Aukey": ("aukey",),
+}
 
 
 def _open_text(path: Path):
@@ -42,8 +55,7 @@ def _stream_jsonl(path: Path) -> Iterator[dict[str, Any]]:
 
 
 def canonicalize_brand(raw_brand: str | None, allowlist: tuple[str, ...]) -> str | None:
-    """Map a raw brand string to a canonical allowlist entry via case-insensitive
-    substring match. Returns the canonical brand or None if no match.
+    """Map a raw brand string to a canonical allowlist entry via aliases.
 
     Handles real-world dirty data like "Anker Innovations", "ANKER", "anker direct".
     """
@@ -52,9 +64,17 @@ def canonicalize_brand(raw_brand: str | None, allowlist: tuple[str, ...]) -> str
     needle = raw_brand.strip().lower()
     if not needle:
         return None
+    scored: list[tuple[int, int, str]] = []
+    order = {brand: i for i, brand in enumerate(allowlist)}
     for allowed in allowlist:
-        if allowed.lower() in needle:
-            return allowed
+        aliases = BRAND_ALIASES.get(allowed, (allowed,))
+        for alias in sorted(aliases, key=len, reverse=True):
+            pattern = r"(?<![a-z0-9])" + re.escape(alias.lower()).replace(r"\ ", r"\s+") + r"(?![a-z0-9])"
+            if re.search(pattern, needle, flags=re.IGNORECASE):
+                scored.append((len(alias), -order[allowed], allowed))
+                break
+    if scored:
+        return max(scored)[2]
     return None
 
 
@@ -70,10 +90,10 @@ def load_asin_brand_map(
     """
     mapping: dict[str, str] = {}
     for row in _stream_jsonl(metadata_path):
-        raw_brand = _extract_brand_from_metadata(row)
-        if not raw_brand:
-            continue
-        brand = canonicalize_brand(raw_brand, allowlist) if allowlist else raw_brand
+        if allowlist:
+            brand = choose_best_brand(match_candidate_brands(row, allowlist), allowlist)
+        else:
+            brand = _extract_brand_from_metadata(row)
         if not brand:
             continue
         for key in ("parent_asin", "asin"):
@@ -155,12 +175,17 @@ def _normalize_row(
     asin_to_brand: dict[str, str] | None,
     allowlist: tuple[str, ...] | None,
 ) -> dict[str, Any] | None:
-    asin = raw.get("asin") or raw.get("parent_asin")
+    parent_asin = raw.get("parent_asin")
+    asin = raw.get("asin") or parent_asin
     asin = str(asin).strip() if asin else None
+    parent_asin = str(parent_asin).strip() if parent_asin else None
 
     raw_brand: str | None = None
-    if asin_to_brand and asin and asin in asin_to_brand:
-        raw_brand = asin_to_brand[asin]
+    if asin_to_brand:
+        for lookup_asin in (parent_asin, asin):
+            if lookup_asin and lookup_asin in asin_to_brand:
+                raw_brand = asin_to_brand[lookup_asin]
+                break
     elif raw.get("brand"):
         raw_brand = str(raw["brand"])
     elif raw.get("store"):

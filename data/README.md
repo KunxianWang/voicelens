@@ -26,7 +26,16 @@ Configure paths via `.env` (`AMAZON_REVIEWS_PATH`, `AMAZON_METADATA_PATH`).
 
 ## Why two files
 
-The reviews file itself **does not contain a `brand` field**. To filter by brand (Anker, Soundcore, Bose, JBL, UGREEN, RAVPower, Aukey) we look up brand from the metadata file by ASIN. If you skip the metadata file, the adapter falls back to any inline `brand` / `store` field that may be present on the review row, and otherwise drops the row.
+The reviews file itself **does not contain a `brand` field**. First scan candidate brands with `BRAND_CANDIDATES` and generate `data/resolved_brand_allowlist.json`; then use the resolved brands as the runtime `BRAND_ALLOWLIST`. If you skip the metadata file, the ingest adapter falls back to any inline `brand` / `store` field that may be present on the review row, and otherwise drops the row.
+
+Expected profiling outputs:
+
+```
+data/brand_inventory.csv
+data/brand_review_counts.csv
+data/resolved_brand_allowlist.json
+data/dataset_profile.json
+```
 
 ## Other datasets
 

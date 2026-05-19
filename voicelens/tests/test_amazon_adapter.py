@@ -137,6 +137,47 @@ def test_metadata_asin_lookup(tmp_path: Path):
     assert out[0]["brand"] == "Anker"
 
 
+def test_metadata_asin_lookup_uses_candidate_brand_scanner(tmp_path: Path):
+    metadata_rows = [
+        {"parent_asin": "B0TITLE001", "title": "JBL Flip portable speaker", "details": {}},
+        {"parent_asin": "B0DETAIL01", "title": "USB cable", "details": {"Compatible": "UGREEN hub"}},
+    ]
+    meta_path = tmp_path / "meta.jsonl"
+    _write_jsonl(meta_path, metadata_rows)
+
+    mapping = load_asin_brand_map(meta_path, allowlist=("JBL", "UGREEN"))
+
+    assert mapping == {"B0TITLE001": "JBL", "B0DETAIL01": "UGREEN"}
+
+
+def test_review_brand_lookup_prefers_parent_asin_when_child_asin_present(tmp_path: Path):
+    metadata_rows = [
+        {"parent_asin": "PARENT1", "title": "Anker USB C charger"},
+    ]
+    review_rows = [
+        {
+            "parent_asin": "PARENT1",
+            "asin": "CHILD1",
+            "rating": 5.0,
+            "title": "great",
+            "text": "this review has a child asin and should still resolve brand.",
+            "user_id": "U1",
+            "timestamp": 1714521600000,
+        }
+    ]
+    meta_path = tmp_path / "meta.jsonl"
+    rev_path = tmp_path / "reviews.jsonl"
+    _write_jsonl(meta_path, metadata_rows)
+    _write_jsonl(rev_path, review_rows)
+
+    mapping = load_asin_brand_map(meta_path, allowlist=("Anker",))
+    out = list(iter_amazon_reviews(rev_path, asin_to_brand=mapping, brand_allowlist=("Anker",)))
+
+    assert len(out) == 1
+    assert out[0]["brand"] == "Anker"
+    assert out[0]["asin"] == "CHILD1"
+
+
 def test_defensive_field_mapping(tmp_path: Path):
     rows = [
         {"rating": "5", "title": None, "text": "rating-as-string, title-null, still loadable.",

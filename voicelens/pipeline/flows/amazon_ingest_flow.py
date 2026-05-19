@@ -30,12 +30,22 @@ from voicelens.pipeline.tasks.dq import run_dq
 from voicelens.pipeline.tasks.normalize import load_reviews
 
 
+def load_brands_file(path: str | Path) -> tuple[str, ...]:
+    with open(path, encoding="utf-8") as f:
+        payload = json.load(f)
+    brands = payload.get("brands")
+    if not isinstance(brands, list) or not all(isinstance(b, str) for b in brands):
+        raise ValueError(f"Brand file must contain a string list at key 'brands': {path}")
+    return tuple(b.strip() for b in brands if b.strip())
+
+
 @flow(name="amazon_ingest_flow")
 def amazon_ingest_flow(
     input_path: str | Path | None = None,
     metadata_path: str | Path | None = None,
     brands: tuple[str, ...] | None = None,
     limit: int | None = None,
+    use_default_limit: bool = True,
     source: str = "amazon_reviews_2023",
 ) -> dict[str, Any]:
     logger = get_run_logger()
@@ -47,7 +57,7 @@ def amazon_ingest_flow(
         metadata_path = Path(metadata_path)
 
     allowlist: tuple[str, ...] = tuple(brands) if brands else BRAND_ALLOWLIST
-    effective_limit = limit if limit is not None else INGEST_LIMIT
+    effective_limit = limit if limit is not None else (INGEST_LIMIT if use_default_limit else None)
 
     if not input_path.exists():
         raise FileNotFoundError(
@@ -129,20 +139,28 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--input", default=None, help="Path to reviews JSONL or JSONL.GZ")
     p.add_argument("--metadata", default=None, help="Optional path to metadata JSONL or JSONL.GZ")
     p.add_argument("--brands", default=None, help="Comma-separated brand allowlist (overrides .env)")
+    p.add_argument("--brands-file", default=None, help="JSON file with {'brands': [...]} allowlist")
     p.add_argument("--limit", type=int, default=None, help="Max rows to ingest after brand filter")
+    p.add_argument("--no-limit", action="store_true", help="Ignore INGEST_LIMIT and ingest all matched rows")
     p.add_argument("--source", default="amazon_reviews_2023", help="ingest_run.source tag")
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    brands = tuple(b.strip() for b in args.brands.split(",")) if args.brands else None
+    if args.brands and args.brands_file:
+        raise ValueError("Use either --brands or --brands-file, not both.")
+    if args.brands_file:
+        brands = load_brands_file(args.brands_file)
+    else:
+        brands = tuple(b.strip() for b in args.brands.split(",")) if args.brands else None
     started = datetime.utcnow()
     summary = amazon_ingest_flow(
         input_path=args.input,
         metadata_path=args.metadata,
         brands=brands,
         limit=args.limit,
+        use_default_limit=not args.no_limit,
         source=args.source,
     )
     elapsed = (datetime.utcnow() - started).total_seconds()

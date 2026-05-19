@@ -200,7 +200,7 @@ make test
 
 ## Milestone 1B: Ingest Amazon Reviews 2023 subset
 
-The synthetic sample above proves the wiring. This milestone adds the **real Amazon Reviews 2023 adapter** with streaming, brand-allowlist filtering, optional metadata-driven brand resolution, and CLI arguments.
+The synthetic sample above proves the wiring. This milestone adds the **real Amazon Reviews 2023 adapter** with streaming, runtime brand-allowlist filtering, optional metadata-driven brand resolution, and CLI arguments.
 
 ### 1. Place the dataset
 
@@ -219,7 +219,10 @@ Then in `.env` (copy from `.env.example`):
 ```
 AMAZON_REVIEWS_PATH=data/Electronics.jsonl
 # AMAZON_METADATA_PATH=data/meta_Electronics.jsonl   # optional
-BRAND_ALLOWLIST=Anker,Soundcore,Bose,JBL,UGREEN,RAVPower,Aukey
+BRAND_CANDIDATES=Anker,Soundcore,Bose,JBL,UGREEN,RAVPower,Aukey
+# BRAND_ALLOWLIST should be derived from data/resolved_brand_allowlist.json
+# after Milestone 1C profiling, for example:
+# BRAND_ALLOWLIST=Anker,Bose,JBL,UGREEN
 INGEST_LIMIT=50000
 ```
 
@@ -328,8 +331,146 @@ docker exec -it voicelens-postgres psql -U voicelens -d voicelens -c \
   1. metadata file lookup by ASIN (`store` / `details.Brand` / `details.Manufacturer`)
   2. inline `brand` / `store` on the review row
   3. otherwise the row is dropped when an allowlist is active
-- **`canonicalize_brand`** does case-insensitive substring matching so "Anker Innovations" / "ANKER" / "anker direct" all map to `Anker`.
+- **`canonicalize_brand`** does case-insensitive alias matching so "Anker Innovations" / "ANKER" / "anker direct" all map to `Anker`.
 - **Adapter only filters by brand and limit**; missing ASIN, invalid rating, short text, etc. fall through to the existing DQ layer (same checks as Milestone 0). This keeps a single source of truth for data quality.
+
+---
+
+## Milestone 1C: profile real Amazon Reviews 2023 dataset
+
+Do this before choosing final MVP brands. Candidate brands are only hypotheses until the metadata and review files prove there are enough matched items and reviews.
+
+### Required files
+
+Put the real files under `data/` or point `.env` at them:
+
+```
+AMAZON_METADATA_PATH=data/meta_Electronics.jsonl.gz
+AMAZON_REVIEWS_PATH=data/Electronics.jsonl.gz
+BRAND_CANDIDATES=Anker,Soundcore,Bose,JBL,UGREEN,RAVPower,Aukey
+```
+
+Supported metadata names include `raw_meta_Electronics.jsonl(.gz)` and `meta_Electronics.jsonl(.gz)`. Supported review names include `Electronics.jsonl(.gz)`. The scripts print clear errors if these files are missing; they do not download datasets.
+
+### Commands
+
+```bash
+make scan-amazon-brands
+make scan-amazon-brand-reviews
+make generate-brand-allowlist
+make profile-amazon-dataset
+```
+
+For a faster smoke test on reviews:
+
+```bash
+make scan-amazon-brand-reviews LIMIT=10000
+make profile-amazon-dataset LIMIT=10000
+```
+
+### Expected output files
+
+```
+data/brand_inventory.csv
+data/brand_review_counts.csv
+data/resolved_brand_allowlist.json
+data/dataset_profile.json
+```
+
+### How to interpret `brand_inventory.csv`
+
+- `matched_items`: metadata rows where the candidate brand or alias appeared.
+- `matched_parent_asins` / `matched_asins`: unique product identifiers matched in metadata.
+- `example_parent_asins` / `example_titles`: quick sanity-check samples.
+- `matched_fields`: where the evidence came from (`store`, `title`, `details.Brand`, serialized `details`, or `categories`).
+- `confidence_notes`: structured `store` / `details.Brand` matches are stronger than title/category-only matches.
+
+### How to interpret `brand_review_counts.csv`
+
+- `matched_reviews`: reviews joined through metadata-derived `parent_asin` / `asin` brand maps.
+- `avg_rating` and `rating_*_count`: rating mix for the matched reviews.
+- `first_review_date` / `last_review_date`: coverage window for each candidate brand.
+
+### Choosing final MVP brands
+
+`scripts/generate_brand_allowlist.py` defaults to `--min-items 20 --min-reviews 1000`. Brands below either threshold are written under `dropped` in `data/resolved_brand_allowlist.json`; brands above both thresholds are recommended for runtime ingestion. Copy the resolved `brands` list into `BRAND_ALLOWLIST` only after reviewing the examples and counts.
+
+Do not treat `Soundcore`, `RAVPower`, or `Aukey` as available just because they are candidates. If they are sparse, missing, or mostly merged into another brand, keep them out of the MVP allowlist.
+
+---
+
+## Milestone 1D: build and ingest MVP subset
+
+The full candidate-brand slice is useful for profiling, but it is too large to ABSA first. ABSA will add LLM cost, retry handling, schema validation, and backfill work; starting with a deterministic ~250k-row subset keeps iteration fast while still preserving brand, rating, and time coverage. ABSA, embeddings, Qdrant, BERTopic, anomaly detection, RAG, LangGraph, and Streamlit remain out of scope here.
+
+### Target counts
+
+Default deterministic stratified sampling targets:
+
+| Brand | Target reviews |
+|---|---:|
+| Anker | 80000 |
+| Bose | 60000 |
+| JBL | 50000 |
+| UGREEN | 30000 |
+| Soundcore | 30000 |
+| RAVPower | 2000 |
+| Aukey | 1500 |
+
+If a brand has fewer reviews than its target, all available reviews are kept. Sampling is deterministic with `--seed 42` by default and uses metadata-derived brand mapping, then preserves rating and year distribution within each brand.
+
+### Build the subset
+
+```bash
+python scripts/build_mvp_subset.py
+# equivalent:
+make build-mvp-subset
+```
+
+Inputs:
+
+```
+AMAZON_REVIEWS_PATH=data/Electronics.jsonl.gz
+AMAZON_METADATA_PATH=data/meta_Electronics.jsonl.gz
+data/resolved_brand_allowlist.json
+```
+
+Outputs:
+
+```
+data/amazon_mvp_reviews.jsonl.gz
+data/amazon_mvp_subset_profile.json
+```
+
+### Ingest the subset
+
+```bash
+python -m voicelens.pipeline.flows.amazon_ingest_flow \
+  --input data/amazon_mvp_reviews.jsonl.gz \
+  --metadata data/meta_Electronics.jsonl.gz \
+  --brands Anker,Bose,JBL,UGREEN,Soundcore,RAVPower,Aukey \
+  --no-limit
+```
+
+Makefile equivalent uses `data/resolved_brand_allowlist.json` directly:
+
+```bash
+make ingest-mvp-subset
+```
+
+### Inspect Postgres
+
+```bash
+python scripts/db_stats.py
+# equivalent:
+make db-stats
+```
+
+Expected outputs:
+
+- `data/amazon_mvp_reviews.jsonl.gz`: reproducible sampled review subset.
+- `data/amazon_mvp_subset_profile.json`: target counts, actual counts by brand, rating distributions, year distributions, total output rows, input paths, seed, and generation timestamp.
+- Postgres `review`, `brand`, `sku`, `ingest_run`, and `dq_event` rows after ingestion.
 
 ---
 

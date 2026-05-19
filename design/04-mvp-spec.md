@@ -50,7 +50,7 @@ If a real brand doesn't have enough data after filtering, we substitute with a *
         │
         ▼
    ingest_flow
-        │  - read & filter brand allowlist
+        │  - read resolved brand allowlist derived from candidate-brand profiling
         │  - drop rows missing rating/text/asin
         │  - write bronze parquet partitioned by brand/month
         ▼
