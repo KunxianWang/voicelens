@@ -2,6 +2,7 @@
         ingest-amazon-fixture ingest-amazon-sample db-stats \
         scan-amazon-brands scan-amazon-brand-reviews generate-brand-allowlist profile-amazon-dataset \
         build-mvp-subset ingest-mvp-subset \
+        seed-aspects absa-smoke absa-stats sample-absa-holdout \
         test lint install
 
 PYTHON ?= python
@@ -22,6 +23,10 @@ help:
 	@echo "  profile-amazon-dataset   write data/dataset_profile.json from metadata + reviews"
 	@echo "  build-mvp-subset         build deterministic Amazon MVP subset JSONL.GZ"
 	@echo "  ingest-mvp-subset        ingest data/amazon_mvp_reviews.jsonl.gz into Postgres"
+	@echo "  seed-aspects             seed aspect_ontology v1 (idempotent)"
+	@echo "  absa-smoke               run absa_flow with MockABSAProvider on first 500 MVP-subset reviews"
+	@echo "  absa-stats               print aspect_mention coverage / distribution / verbatim rate"
+	@echo "  sample-absa-holdout      write data/labeling/absa_holdout_seed.jsonl for manual labeling"
 	@echo "  db-stats                 print review / brand / rating / DQ counts"
 	@echo "  test                     run pytest (uses SQLite in-memory)"
 	@echo "  lint                     ruff check"
@@ -82,6 +87,21 @@ ingest-mvp-subset:
 
 db-stats:
 	$(PYTHON) scripts/db_stats.py
+
+seed-aspects:
+	$(PYTHON) scripts/seed_aspect_ontology.py
+
+absa-smoke:
+	$(PYTHON) -m voicelens.pipeline.flows.absa_flow \
+	  --source amazon_reviews_2023_mvp_subset \
+	  --limit 500 \
+	  --provider mock
+
+absa-stats:
+	$(PYTHON) scripts/absa_stats.py
+
+sample-absa-holdout:
+	$(PYTHON) scripts/sample_absa_holdout.py --source amazon_reviews_2023_mvp_subset
 
 test:
 	$(PYTHON) -m pytest

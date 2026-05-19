@@ -474,9 +474,264 @@ Expected outputs:
 
 ---
 
+## Milestone 2A: ABSA v1 foundation
+
+This milestone wires up the **aspect-based sentiment analysis** layer end
+to end with a deterministic mock provider so the contract, schema,
+validators, idempotency, and stats are all proved out before any real LLM
+calls. ABSA against the full 245k-review MVP subset is intentionally
+deferred — we will not burn LLM budget until the validator surface is
+trusted and a 200-review hand-labeled holdout exists to measure macro-F1.
+
+### Why not run ABSA on all 245k reviews now
+
+- Real-LLM calls are M2B, not M2A. M2A defines the contract.
+- We need a labeled holdout before we can measure ABSA quality. The
+  holdout sampler in this milestone is the input to that labeling pass.
+- The mock provider is good enough to validate the pipeline plumbing
+  (DB schema, idempotency, stats) without spending API credits.
+
+### 1. Seed the aspect ontology
+
+```bash
+make seed-aspects
+# equivalent: python scripts/seed_aspect_ontology.py
+```
+
+Writes the seven v1 aspects to `aspect_ontology`:
+`battery`, `charging`, `overheating`, `sound_quality`, `bluetooth`,
+`delivery`, `price`. Idempotent — re-running upserts the same rows.
+
+Expected output:
+
+```
+Aspect ontology v1: inserted=7, updated=0, total_rows=7
+```
+
+### 2. Run the ABSA smoke batch (mock provider)
+
+```bash
+make absa-smoke
+# equivalent:
+# python -m voicelens.pipeline.flows.absa_flow \
+#   --source amazon_reviews_2023_mvp_subset \
+#   --limit 500 \
+#   --provider mock
+```
+
+The flow:
+
+1. Selects up to 500 reviews from `amazon_reviews_2023_mvp_subset` that
+   do not yet have `aspect_mention` rows for `(version=v1, model=mock)`.
+2. Runs `MockABSAProvider` (keyword-based, deterministic).
+3. Validates each output (schema + verbatim quote + per-review aspect
+   uniqueness + ontology membership).
+4. Inserts surviving mentions into `aspect_mention`.
+5. Prints a JSON summary.
+
+Expected fields in the summary:
+
+```json
+{
+  "input_reviews": 500,
+  "processed_reviews": 500,
+  "reviews_with_mentions": "<count>",
+  "inserted_mentions": "<count>",
+  "invalid_outputs": 0,
+  "evidence_verbatim_rate": 1.0,
+  "aspect_counts": { "battery": "...", "...": "..." },
+  "sentiment_counts": { "positive": "...", "neutral": "...", "negative": "..." },
+  "severity_counts": { "low": "...", "medium": "...", "high": "..." },
+  "validation_errors": {
+    "schema_validation_failed": 0,
+    "aspect_code_not_in_ontology": 0,
+    "evidence_quote_not_verbatim": 0,
+    "duplicate_aspect_in_review": 0
+  },
+  "model_name": "mock",
+  "aspect_version": "v1"
+}
+```
+
+The mock provider always produces verbatim quotes, so
+`evidence_verbatim_rate == 1.0` is the expected baseline for the smoke
+run. A real LLM provider in M2B will drift below 1.0 and we will use
+that to tune the prompt.
+
+### 3. Switching to a real LLM provider (M2B placeholder)
+
+`LLMABSAProvider` is wired but the call site is intentionally not
+implemented in this milestone. Configuring `ABSA_PROVIDER=openai` or
+`ABSA_PROVIDER=anthropic` without the matching API key fails fast with
+a clear error.
+
+```bash
+# fails with a clear message in M2A
+python -m voicelens.pipeline.flows.absa_flow \
+  --source amazon_reviews_2023_mvp_subset \
+  --limit 500 \
+  --provider openai
+```
+
+Implementation lands in M2B; tests use only the mock.
+
+### 4. Idempotency and re-runs
+
+Two tables back the ABSA pipeline:
+
+- `aspect_mention` — one row per **positive extraction**. A review with
+  `{"aspects": []}` writes no rows here.
+- `absa_review_status` — one row per **processed review**. Always
+  written, even when the provider returns zero aspects. This is the
+  table the flow consults when deciding what to skip on the next run.
+
+Why the split: `aspect_mention` is the analytics-facing table that
+downstream BERTopic / anomaly / RAG nodes read from. `absa_review_status`
+is the operational table that gives us *review-level* idempotency,
+coverage metrics, and (critically) cost control before turning on the
+real LLM — a review that already cost us an LLM call must not be paid
+for twice on a re-run, regardless of whether the model emitted aspects
+or returned an empty list.
+
+Status values:
+
+| status | meaning |
+|---|---|
+| `success` | at least one valid mention inserted |
+| `no_mentions` | provider returned `{"aspects": []}` and no errors |
+| `invalid` | provider emitted aspects but all failed validation |
+| `failed` | provider raised an exception during extraction |
+
+Rules:
+
+- Default behavior: a review with **any** `absa_review_status` row for
+  `(aspect_version, provider, model_name)` is **skipped** on the next
+  run — including no_mentions, invalid, and failed.
+- `--force` deletes both the status row and any matched `aspect_mention`
+  rows for `(review_id, aspect_version, provider, model_name)`, then
+  reprocesses.
+- The idempotency key is `(review_id, aspect_version, provider,
+  model_name)`, so the same review can be processed by `mock` and (later)
+  `openai:gpt-4o-mini` side-by-side with separate status rows for
+  comparison.
+
+### 5. Inspect aspect_mention rows
+
+```bash
+make absa-stats
+# equivalent: python scripts/absa_stats.py
+```
+
+Prints:
+
+```
+== VoiceLens ABSA stats ==
+  total_aspect_mentions    : <N>
+  total_reviews            : <M>
+  processed_reviews        : <P>
+  reviews_with_mentions    : <K>
+  reviews_no_mentions      : <Z>
+  invalid_reviews          : <I>
+  failed_reviews           : <F>
+  processed_coverage_rate  : <P/M>
+  mention_coverage_rate    : <K/M>
+  evidence_verbatim_rate   : <verbatim_hits / N>
+
+-- aspect distribution --
+  charging          ...
+  battery           ...
+  bluetooth         ...
+  ...
+
+-- sentiment distribution --
+  positive          ...
+  neutral           ...
+  negative          ...
+
+-- severity distribution --
+  low               ...
+  medium            ...
+  high              ...
+
+-- top brands by negative mentions --
+  Anker             ...
+  Bose              ...
+```
+
+`processed_coverage_rate` rises with every run; `mention_coverage_rate`
+is bounded by it (a review must be processed before it can contribute a
+mention). The gap = `reviews_no_mentions + invalid_reviews +
+failed_reviews`.
+
+Raw SQL alternative:
+
+```bash
+docker exec -it voicelens-postgres psql -U voicelens -d voicelens -c \
+  "select ao.code, am.sentiment, count(*) \
+   from aspect_mention am join aspect_ontology ao on ao.id = am.aspect_id \
+   group by 1, 2 order by 1, 2;"
+```
+
+### 6. Sample the 200-review hand-label holdout
+
+```bash
+make sample-absa-holdout
+# equivalent:
+# python scripts/sample_absa_holdout.py --source amazon_reviews_2023_mvp_subset
+```
+
+Writes `data/labeling/absa_holdout_seed.jsonl`. Each row carries the
+review fields needed to label by hand plus an empty `gold_aspects: []`
+slot.
+
+Sampling is **deterministic** (BLAKE2b-seeded; same DB → same sample)
+and **balanced** across brands and ratings via round-robin selection.
+Re-running with the same `--seed` produces the same file.
+
+The labeled file becomes the macro-F1 holdout in M2B; M2A only writes
+the scaffold. Do not fill labels in this milestone.
+
+### 7. Files added by this milestone
+
+```
+voicelens/nlp/
+  __init__.py
+  absa/
+    __init__.py
+    schema.py            Pydantic models for provider output
+    extractor.py         provider.extract -> validate_absa_output
+    validators.py        ontology + verbatim + uniqueness checks
+    prompts.py           system + user prompts for LLM providers
+    providers.py         MockABSAProvider, LLMABSAProvider, get_provider
+
+voicelens/pipeline/flows/
+  absa_flow.py           select unprocessed -> extract -> validate -> insert
+
+voicelens/db/models.py
+  AspectMention          one row per positive extraction (analytics)
+  ABSAReviewStatus       one row per processed review (operational; M2A.1)
+
+scripts/
+  seed_aspect_ontology.py
+  absa_stats.py
+  sample_absa_holdout.py
+```
+
+### 8. What this milestone does NOT do
+
+- No embeddings, no Qdrant writes, no BERTopic, no anomaly detection.
+- No RAG, no LangGraph, no Streamlit.
+- No real-LLM calls — `LLMABSAProvider.extract` raises
+  `NotImplementedError`.
+- No ABSA on all 245k reviews — the smoke run is capped at 500.
+
+These ship in M2B (real-LLM ABSA + macro-F1 on holdout) and later.
+
+---
+
 ## Not yet implemented (intentionally)
 
-- ABSA (LLM aspect extraction).
+- Real-LLM ABSA over the full 245k MVP subset.
 - Embeddings + Qdrant indexing.
 - BERTopic clustering.
 - EWMA anomaly detection.

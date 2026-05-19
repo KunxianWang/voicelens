@@ -112,7 +112,7 @@ class AspectOntology(Base):
 
 
 class AspectMention(Base):
-    """Placeholder table. ABSA is post-Week-1 work."""
+    """One aspect detected on one review (positive extractions only)."""
 
     __tablename__ = "aspect_mention"
 
@@ -127,3 +127,42 @@ class AspectMention(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     review: Mapped[Review] = relationship("Review", back_populates="aspect_mentions")
+
+
+class ABSAReviewStatus(Base):
+    """Per-review ABSA processing record.
+
+    ``aspect_mention`` only records positive extractions, so a review with
+    ``{"aspects": []}`` leaves no fingerprint there. This table records
+    review-level processing outcome so re-runs can skip reviews we have
+    already paid to process — load-bearing for real-LLM cost control.
+
+    The unique constraint ``(review_id, aspect_version, provider,
+    model_name)`` lets us run multiple providers (mock + LLM) side-by-side
+    and compare their coverage without one clobbering the other.
+    """
+
+    __tablename__ = "absa_review_status"
+    __table_args__ = (
+        UniqueConstraint(
+            "review_id", "aspect_version", "provider", "model_name",
+            name="uq_absa_status_review_version_provider_model",
+        ),
+    )
+
+    STATUS_SUCCESS = "success"
+    STATUS_NO_MENTIONS = "no_mentions"
+    STATUS_INVALID = "invalid"
+    STATUS_FAILED = "failed"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    review_id: Mapped[int] = mapped_column(ForeignKey("review.id"), nullable=False, index=True)
+    aspect_version: Mapped[str] = mapped_column(String(16), nullable=False, default="v1")
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    n_mentions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_errors: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_codes_json: Mapped[dict | None] = mapped_column(JSON)
+    processed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
