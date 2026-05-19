@@ -145,6 +145,12 @@ _NEGATIVE_MARKERS = (
     "no longer", "stop", "stops", "slow", "weak", "cheap quality",
     "not worth", "overpriced", "not happy", "unhappy", "complaint",
     "complaints", "annoying", "lousy", "subpar",
+    # v2 reliability-flavored failure markers — keep these in sync with
+    # _RELIABILITY_KEYWORDS so reliability mentions always classify as
+    # negative with an appropriate severity.
+    "defective", "dead on arrival", "doa", "poor quality",
+    "not working anymore", "quit working", "lasted only", "stopped after",
+    "died",
 )
 _POSITIVE_MARKERS = (
     "great", "excellent", "amazing", "love", "perfect", "fantastic",
@@ -159,6 +165,8 @@ _HIGH_SEVERITY_MARKERS = (
 _MEDIUM_SEVERITY_MARKERS = (
     "unusable", "returned", "broken", "never worked", "dead on arrival",
     "doesn't work", "does not work", "broke after", "stopped working",
+    "defective", "doa", "not working anymore", "quit working",
+    "stopped after", "died",
 )
 
 _RULES: tuple[_KeywordRule, ...] = (
@@ -169,6 +177,39 @@ _RULES: tuple[_KeywordRule, ...] = (
     _KeywordRule("bluetooth", ("bluetooth", "pair", "pairing", "paired", "connect", "connecting", "connection", "latency", "range", "drops out", "drop out", "drops")),
     _KeywordRule("delivery", ("delivery", "shipping", "shipped", "package", "packaging", "arrived", "missing item", "missing items", "wrong item")),
     _KeywordRule("price", ("price", "value", "expensive", "cheap", "overpriced", "worth the money", "for the money")),
+)
+
+# Catch-all reliability triggers. Order matters only for which evidence
+# sentence wins on multi-keyword hits; the first match is taken.
+_RELIABILITY_KEYWORDS: tuple[str, ...] = (
+    "stopped working",
+    "stopped after",
+    "not working anymore",
+    "quit working",
+    "lasted only",
+    "dead on arrival",
+    "doa",
+    "defective",
+    "poor quality",
+    "broken",
+    "broke",
+    "died",
+    "failed",
+)
+
+# When this set of words appears in the reliability evidence sentence,
+# the failure is shipping/packaging-only and ``reliability`` is
+# suppressed UNLESS an explicit product-failure marker is also present.
+_RELIABILITY_DELIVERY_GUARD: tuple[str, ...] = (
+    "package", "packaging", "shipping", "shipped", "shipment",
+)
+
+# Words that, when present, mean the failure is the product itself even
+# if the sentence ALSO talks about the package. Used to override the
+# delivery-only guard above.
+_RELIABILITY_PRODUCT_FAILURE_OVERRIDES: tuple[str, ...] = (
+    "broke", "broken", "defective", "dead on arrival", "doa",
+    "stopped working", "died", "failed",
 )
 
 
@@ -217,6 +258,52 @@ def _classify_sentiment(quote: str) -> tuple[str, str | None]:
     if has_pos and not has_neg:
         return "positive", None
     return "neutral", None
+
+
+def _detect_reliability(text: str) -> AspectMentionOut | None:
+    """Detect a ``reliability`` mention with v2 disambiguation rules.
+
+    Returns ``None`` when:
+    - no reliability keyword is present, or
+    - the evidence sentence is dominated by a more specific aspect
+      (battery/charging/bluetooth/sound/overheating/price), or
+    - the evidence sentence describes shipping/package damage and not
+      an explicit product failure.
+    """
+    lowered = text.lower()
+    specific_keywords: tuple[str, ...] = tuple(
+        keyword
+        for rule in _RULES
+        if rule.aspect_code != "delivery"
+        for keyword in rule.keywords
+    )
+    for keyword in _RELIABILITY_KEYWORDS:
+        if keyword not in lowered:
+            continue
+        quote = _find_sentence_containing(text, keyword)
+        if quote is None or quote not in text:
+            continue
+        q_lower = quote.lower()
+        # Specific aspect beats reliability: skip when a non-delivery
+        # ontology keyword is also present in the same sentence.
+        if any(spec in q_lower for spec in specific_keywords):
+            continue
+        # Delivery-only damage guard: skip when shipping/package context
+        # is present and no explicit product-failure marker overrides it.
+        delivery_only = (
+            any(d in q_lower for d in _RELIABILITY_DELIVERY_GUARD)
+            and not any(f in q_lower for f in _RELIABILITY_PRODUCT_FAILURE_OVERRIDES)
+        )
+        if delivery_only:
+            continue
+        sentiment, severity = _classify_sentiment(quote)
+        return AspectMentionOut(
+            aspect_code="reliability",
+            sentiment=sentiment,  # type: ignore[arg-type]
+            severity=severity,  # type: ignore[arg-type]
+            evidence_quote=quote,
+        )
+    return None
 
 
 class MockABSAProvider(ABSAProvider):
@@ -268,6 +355,15 @@ class MockABSAProvider(ABSAProvider):
                     )
                     seen.add(rule.aspect_code)
                     break
+
+        # v2: catch-all reliability aspect with prompt-consistent guards.
+        # Specific aspects already in ``seen`` beat reliability; shipping
+        # damage that doesn't describe a defective unit is left to delivery.
+        if "reliability" not in seen:
+            reliability = _detect_reliability(review_text)
+            if reliability is not None:
+                mentions.append(reliability)
+
         out = ABSAOutput(aspects=mentions)
         self.usage.add_call(latency_ms=(time.perf_counter() - start) * 1000)
         return out
@@ -457,9 +553,9 @@ def _absa_json_schema() -> dict[str, Any]:
 
 
 def _ONTOLOGY_CODES() -> tuple[str, ...]:
-    from voicelens.nlp.absa.schema import ONTOLOGY_CODES_V1
+    from voicelens.nlp.absa.schema import ONTOLOGY_CODES_LATEST
 
-    return ONTOLOGY_CODES_V1
+    return ONTOLOGY_CODES_LATEST
 
 
 class TransientLLMError(RuntimeError):

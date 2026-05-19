@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import Any
 
-from voicelens.nlp.absa.schema import ONTOLOGY_CODES_V1
+from voicelens.nlp.absa.schema import ONTOLOGY_CODES_LATEST
 
 
 def _aspects(row: dict[str, Any], key: str) -> list[dict[str, Any]]:
@@ -38,8 +38,28 @@ def _cohen_kappa(pairs: list[tuple[str, str]]) -> float | None:
     return _safe_div(observed - expected, 1 - expected)
 
 
+def _eval_codes(rows: list[dict[str, Any]]) -> tuple[str, ...]:
+    """Per-aspect breakdown should cover every code that could appear in
+    gold OR predictions for this holdout. Start from the latest ontology
+    so absent aspects still show up with zero counts, then add any
+    out-of-ontology codes that did show up (so the breakdown reflects
+    reality instead of silently hiding them).
+    """
+    seen: set[str] = set(ONTOLOGY_CODES_LATEST)
+    for row in rows:
+        for key in ("gold_aspects", "predicted_aspects"):
+            for aspect in _aspects(row, key):
+                code = aspect.get("aspect_code") if isinstance(aspect, dict) else None
+                if isinstance(code, str):
+                    seen.add(code)
+    return tuple(
+        sorted(seen, key=lambda c: (c not in ONTOLOGY_CODES_LATEST, c))
+    )
+
+
 def evaluate_absa_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    per_aspect: dict[str, Counter[str]] = {code: Counter() for code in ONTOLOGY_CODES_V1}
+    codes = _eval_codes(rows)
+    per_aspect: dict[str, Counter[str]] = {code: Counter() for code in codes}
     sentiment_pairs: list[tuple[str, str]] = []
     severity_pairs: list[tuple[str, str]] = []
     evidence_total = 0
@@ -54,7 +74,7 @@ def evaluate_absa_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if row.get("validation_errors"):
             invalid_rows += 1
 
-        for code in ONTOLOGY_CODES_V1:
+        for code in codes:
             in_gold = code in gold
             in_pred = code in pred
             if in_gold and in_pred:

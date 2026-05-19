@@ -40,7 +40,7 @@ def export_predictions(
     output_path: Path = DEFAULT_OUTPUT,
     provider: str = "openai",
     model_name: str | None = None,
-    aspect_version: str = "v1",
+    aspect_version: str = "v2",
 ) -> list[dict[str, Any]]:
     if not holdout_path.exists():
         raise FileNotFoundError(
@@ -134,7 +134,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     parser.add_argument("--provider", default="openai")
     parser.add_argument("--model", default=None)
-    parser.add_argument("--aspect-version", default="v1")
+    parser.add_argument("--aspect-version", default="v2")
     return parser.parse_args(argv)
 
 

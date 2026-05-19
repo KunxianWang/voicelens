@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from voicelens.nlp.absa.schema import ONTOLOGY_CODES_V1, SENTIMENTS, SEVERITIES
+from voicelens.nlp.absa.schema import ONTOLOGY_CODES_LATEST, SENTIMENTS, SEVERITIES
 
 DEFAULT_LABELED = Path("data/labeling/absa_holdout_labeled.jsonl")
 SEED_PATH = Path("data/labeling/absa_holdout_seed.jsonl")
@@ -81,9 +81,9 @@ def _validate_aspect(
         return [f"{prefix}: must be an object, got {type(aspect).__name__}"]
 
     code = aspect.get("aspect_code")
-    if code not in ONTOLOGY_CODES_V1:
+    if code not in ONTOLOGY_CODES_LATEST:
         errors.append(
-            f"{prefix}: aspect_code {code!r} is not in ontology {ONTOLOGY_CODES_V1}"
+            f"{prefix}: aspect_code {code!r} is not in ontology {ONTOLOGY_CODES_LATEST}"
         )
 
     sentiment = aspect.get("sentiment")

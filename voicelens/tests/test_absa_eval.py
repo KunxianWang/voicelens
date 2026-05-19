@@ -140,6 +140,7 @@ def test_export_predictions_works_on_tiny_db(tmp_path: Path, session):
         output_path=output,
         provider="openai",
         model_name="gpt-test",
+        aspect_version="v1",
     )
 
     assert len(rows) == 1

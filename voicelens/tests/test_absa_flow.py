@@ -11,6 +11,7 @@ from voicelens.db.models import (
     IngestRun,
     Review,
 )
+from voicelens.nlp.absa import LATEST_ONTOLOGY_VERSION, ONTOLOGY_CODES_LATEST
 from voicelens.pipeline.flows.absa_flow import absa_flow
 from voicelens.tests._absa_fixture import REVIEW_TEXTS
 from voicelens.tests._absa_fixture import seed_reviews as _seed_reviews
@@ -31,7 +32,7 @@ def test_absa_flow_inserts_valid_mentions(seeded_engine):
     assert summary["evidence_verbatim_rate"] == 1.0
     assert summary["provider"] == "mock"
     assert summary["model_name"] == "mock"
-    assert summary["aspect_version"] == "v1"
+    assert summary["aspect_version"] == LATEST_ONTOLOGY_VERSION
 
     SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
     with SessionLocal() as s:
@@ -39,7 +40,7 @@ def test_absa_flow_inserts_valid_mentions(seeded_engine):
         rows = list(s.execute(select(AspectMention)).scalars())
     assert n == summary["inserted_mentions"]
     assert all(r.model_name == "mock" for r in rows)
-    assert all(r.aspect_version == "v1" for r in rows)
+    assert all(r.aspect_version == LATEST_ONTOLOGY_VERSION for r in rows)
     for r in rows:
         if r.sentiment == "negative":
             assert r.severity in {"low", "medium", "high"}
@@ -132,7 +133,7 @@ def test_absa_flow_runs_on_real_postgres_like_store(seeded_engine):
     SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
     with SessionLocal() as s:
         n_ontology = s.scalar(select(func.count()).select_from(AspectOntology))
-    assert n_ontology == 7
+    assert n_ontology == len(ONTOLOGY_CODES_LATEST)
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +154,7 @@ def test_no_mentions_review_is_recorded_as_no_mentions(seeded_engine):
             select(ABSAReviewStatus).where(
                 ABSAReviewStatus.review_id == no_aspects_review_id,
                 ABSAReviewStatus.provider == "mock",
-                ABSAReviewStatus.aspect_version == "v1",
+                ABSAReviewStatus.aspect_version == LATEST_ONTOLOGY_VERSION,
             )
         )
         n_mentions_for_review = s.scalar(

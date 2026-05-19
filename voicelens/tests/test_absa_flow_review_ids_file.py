@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 
 from voicelens.db.models import ABSAReviewStatus, AspectMention, IngestRun, Review
+from voicelens.nlp.absa import LATEST_ONTOLOGY_VERSION
 from voicelens.pipeline.flows.absa_flow import (
     _read_review_ids_file,
     _resolve_review_ids,
@@ -85,7 +86,7 @@ def test_review_ids_file_processes_only_listed_reviews(seeded_engine, tmp_path: 
             s.execute(
                 select(ABSAReviewStatus.review_id).where(
                     ABSAReviewStatus.provider == "mock",
-                    ABSAReviewStatus.aspect_version == "v1",
+                    ABSAReviewStatus.aspect_version == LATEST_ONTOLOGY_VERSION,
                 )
             ).scalars()
         )
@@ -114,7 +115,7 @@ def test_review_ids_file_source_id_fallback_resolves(seeded_engine, tmp_path: Pa
             s.execute(
                 select(ABSAReviewStatus.review_id).where(
                     ABSAReviewStatus.provider == "mock",
-                    ABSAReviewStatus.aspect_version == "v1",
+                    ABSAReviewStatus.aspect_version == LATEST_ONTOLOGY_VERSION,
                 )
             ).scalars()
         )

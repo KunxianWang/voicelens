@@ -46,9 +46,10 @@ from voicelens.db.models import (
     Review,
 )
 from voicelens.nlp.absa import (
-    ONTOLOGY_CODES_V1,
+    LATEST_ONTOLOGY_VERSION,
     ABSAProvider,
     get_provider,
+    ontology_codes,
 )
 from voicelens.nlp.absa.extractor import extract_for_review
 from voicelens.nlp.absa.validators import (
@@ -58,7 +59,7 @@ from voicelens.nlp.absa.validators import (
     ERR_SCHEMA,
 )
 
-DEFAULT_ONTOLOGY_VERSION = "v1"
+DEFAULT_ONTOLOGY_VERSION = LATEST_ONTOLOGY_VERSION
 DEFAULT_BATCH_SIZE = 200
 
 
@@ -441,7 +442,7 @@ def absa_flow(
 
     with get_session() as session:
         ontology = _load_ontology(session, aspect_version)
-        ontology_codes = tuple(ontology.keys()) or ONTOLOGY_CODES_V1
+        active_ontology_codes = tuple(ontology.keys()) or ontology_codes(aspect_version)
 
         explicit_ids: list[int] | None = None
         if review_ids_file is not None:
@@ -514,7 +515,7 @@ def absa_flow(
                 summary["processed_reviews"] += 1
 
                 try:
-                    outcome = extract_for_review(absa, review.id, review.text_raw, ontology_codes)
+                    outcome = extract_for_review(absa, review.id, review.text_raw, active_ontology_codes)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "absa_flow: provider raised on review_id=%s: %s", review.id, exc

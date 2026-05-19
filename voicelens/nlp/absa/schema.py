@@ -20,9 +20,27 @@ ONTOLOGY_CODES_V1: tuple[str, ...] = (
     "delivery",
     "price",
 )
+ONTOLOGY_CODES_V2: tuple[str, ...] = ONTOLOGY_CODES_V1 + ("reliability",)
+ONTOLOGY_CODES_BY_VERSION: dict[str, tuple[str, ...]] = {
+    "v1": ONTOLOGY_CODES_V1,
+    "v2": ONTOLOGY_CODES_V2,
+}
+LATEST_ONTOLOGY_VERSION = "v2"
+ONTOLOGY_CODES_LATEST: tuple[str, ...] = ONTOLOGY_CODES_BY_VERSION[LATEST_ONTOLOGY_VERSION]
 
 SENTIMENTS: tuple[str, ...] = ("positive", "neutral", "negative")
 SEVERITIES: tuple[str, ...] = ("low", "medium", "high")
+
+
+def ontology_codes(version: str = LATEST_ONTOLOGY_VERSION) -> tuple[str, ...]:
+    """Return the closed set of valid aspect_codes for the given version."""
+    try:
+        return ONTOLOGY_CODES_BY_VERSION[version]
+    except KeyError as exc:
+        known = sorted(ONTOLOGY_CODES_BY_VERSION)
+        raise ValueError(
+            f"Unknown ontology version {version!r}. Known versions: {known}"
+        ) from exc
 
 Sentiment = Literal["positive", "neutral", "negative"]
 Severity = Literal["low", "medium", "high"]

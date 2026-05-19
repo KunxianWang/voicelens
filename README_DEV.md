@@ -1039,6 +1039,80 @@ Below those bars, label more rows and iterate the prompt instead.
 
 ---
 
+## Milestone 2C.2: ontology v2 (reliability aspect)
+
+Manual labeling on the first 50 holdout rows surfaced a gap: many reviews
+describe generic product failure ("Stopped working after one week",
+"Dead on arrival", "broke after two days") without naming a specific
+component. None of the v1 aspects fit, so the LLM kept emitting
+`extra_aspect` errors trying to force the failure into `battery` or
+`charging`.
+
+Ontology v2 adds one catch-all aspect:
+
+| code | label | when to use |
+|---|---|---|
+| `reliability` | Reliability / Durability / General product failure | review describes general product failure, durability issues, defective units, stopped working, broke quickly, DOA, or poor build quality — and the failure is NOT clearly attributable to a more specific aspect |
+
+### v1 vs v2
+
+- **v1**: 7 aspects (`battery`, `charging`, `overheating`, `sound_quality`,
+  `bluetooth`, `delivery`, `price`).
+- **v2**: 8 aspects (v1 + `reliability`).
+
+Both versions stay seeded. Existing `aspect_mention` and
+`absa_review_status` rows under v1 are NEVER deleted — they remain
+queryable. New ABSA runs default to `--aspect-version v2`.
+
+### Disambiguation rules (in prompt and mock provider)
+
+- Specific aspects beat `reliability`. "Battery died after a week" →
+  `battery`, not `reliability`.
+- `reliability` is NOT for shipping/package damage. Use `delivery`
+  instead. Only fall back to `reliability` when the product itself is
+  described as defective or broken (e.g. DOA).
+- Do NOT use `reliability` just because the rating is low.
+- If evidence is ambiguous, prefer NOT extracting `reliability`.
+
+### Seed v2
+
+```bash
+make seed-aspects
+# equivalent: python scripts/seed_aspect_ontology.py --all
+```
+
+`--all` seeds every known version. `--version v1` or `--version v2`
+target one version explicitly. Idempotent — re-running is safe.
+
+### Re-run holdout under v2
+
+Because the ontology changed, **holdout labels should be reviewed and
+updated** before comparing v1 vs v2 metrics. Any review that was
+previously left empty because "no v1 aspect fit" may now warrant a
+`reliability` gold label.
+
+```bash
+# 1. re-validate labels (the validator now accepts reliability)
+make validate-absa-labels
+
+# 2. force re-extract the 50 holdout reviews under v2
+python -m voicelens.pipeline.flows.absa_flow \
+  --review-ids-file data/labeling/absa_holdout_labeled.jsonl \
+  --provider "$ABSA_LLM_PROVIDER" --model "$ABSA_MODEL" \
+  --aspect-version v2 --force
+
+# 3. eval against the labeled set
+make export-absa-predictions  # uses v2 by default
+make evaluate-absa-50
+make export-absa-errors
+```
+
+`absa-llm-1k`, `absa-llm-smoke`, and `absa-llm-holdout-50` now all
+pass `--aspect-version v2` by default. Override with
+`ABSA_ASPECT_VERSION=v1 make ...` to run an old-ontology batch.
+
+---
+
 ## Not yet implemented (intentionally)
 
 - Real-LLM ABSA over the full 245k MVP subset.

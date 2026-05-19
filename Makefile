@@ -11,6 +11,7 @@ PYTHON ?= python
 ABSA_LLM_PROVIDER ?= anthropic
 ABSA_MODEL ?= claude-opus-4.6
 ABSA_MAX_COST_USD ?= 5
+ABSA_ASPECT_VERSION ?= v2
 
 help:
 	@echo "Targets:"
@@ -28,7 +29,7 @@ help:
 	@echo "  profile-amazon-dataset   write data/dataset_profile.json from metadata + reviews"
 	@echo "  build-mvp-subset         build deterministic Amazon MVP subset JSONL.GZ"
 	@echo "  ingest-mvp-subset        ingest data/amazon_mvp_reviews.jsonl.gz into Postgres"
-	@echo "  seed-aspects             seed aspect_ontology v1 (idempotent)"
+	@echo "  seed-aspects             seed aspect_ontology (default v2; pass --version v1 or --all directly to the script)"
 	@echo "  absa-smoke               run absa_flow with MockABSAProvider on first 500 MVP-subset reviews"
 	@echo "  absa-llm-smoke           run real LLM ABSA on 100 MVP-subset reviews"
 	@echo "  absa-llm-1k              run real LLM ABSA on 1000 MVP-subset reviews"
@@ -102,7 +103,7 @@ db-stats:
 	$(PYTHON) scripts/db_stats.py
 
 seed-aspects:
-	$(PYTHON) scripts/seed_aspect_ontology.py
+	$(PYTHON) scripts/seed_aspect_ontology.py --all
 
 absa-smoke:
 	$(PYTHON) -m voicelens.pipeline.flows.absa_flow \
@@ -116,6 +117,7 @@ absa-llm-smoke:
 	  --limit 100 \
 	  --provider "$(ABSA_LLM_PROVIDER)" \
 	  --model "$(ABSA_MODEL)" \
+	  --aspect-version "$(ABSA_ASPECT_VERSION)" \
 	  --llm-max-retries 2 \
 	  --llm-retry-base-seconds 1.0 \
 	  --min-processed-for-rate-guardrail 50 \
@@ -129,6 +131,7 @@ absa-llm-1k:
 	  --limit 1000 \
 	  --provider "$(ABSA_LLM_PROVIDER)" \
 	  --model "$(ABSA_MODEL)" \
+	  --aspect-version "$(ABSA_ASPECT_VERSION)" \
 	  --llm-max-retries 2 \
 	  --llm-retry-base-seconds 1.0 \
 	  --min-processed-for-rate-guardrail 50 \
@@ -141,6 +144,7 @@ absa-llm-holdout-50:
 	  --review-ids-file data/labeling/absa_holdout_labeled.jsonl \
 	  --provider "$(ABSA_LLM_PROVIDER)" \
 	  --model "$(ABSA_MODEL)" \
+	  --aspect-version "$(ABSA_ASPECT_VERSION)" \
 	  --llm-max-retries 2 \
 	  --llm-retry-base-seconds 1.0 \
 	  --min-processed-for-rate-guardrail 20 \
@@ -155,7 +159,7 @@ sample-absa-holdout:
 	$(PYTHON) scripts/sample_absa_holdout.py --source amazon_reviews_2023_mvp_subset
 
 export-absa-predictions:
-	$(PYTHON) scripts/export_absa_predictions_for_labeling.py --model "$(ABSA_MODEL)"
+	$(PYTHON) scripts/export_absa_predictions_for_labeling.py --model "$(ABSA_MODEL)" --aspect-version "$(ABSA_ASPECT_VERSION)"
 
 evaluate-absa:
 	$(PYTHON) scripts/evaluate_absa.py
