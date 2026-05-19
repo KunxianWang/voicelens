@@ -1,28 +1,20 @@
-"""ABSA providers.
-
-Two concrete providers ship today:
-
-- :class:`MockABSAProvider` — deterministic, rule-based keyword matcher.
-  Used in tests, the local smoke flow, and CI. Outputs are guaranteed to
-  pass schema + verbatim validation when the keyword is present in the
-  review text. No network, no model, no cost.
-
-- :class:`LLMABSAProvider` — a thin stub that wires real OpenAI / Anthropic
-  clients to the prompt in ``prompts.py``. It refuses to construct unless
-  the corresponding API key is present, so a misconfigured environment
-  fails fast instead of silently hitting a stub. Tests must use the mock.
-
-A factory :func:`get_provider` reads ``ABSA_PROVIDER`` from the environment
-(or an explicit argument) and returns the right concrete provider. The
-flow uses the factory; downstream consumers can pass their own instance.
-"""
+"""ABSA providers."""
 from __future__ import annotations
 
+import json
 import os
+import random
 import re
+import time
+import urllib.error
+import urllib.request
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
+from pydantic import ValidationError as PydanticValidationError
+
+from voicelens.nlp.absa.prompts import ABSA_SYSTEM_PROMPT, build_user_prompt
 from voicelens.nlp.absa.schema import ABSAOutput, AspectMentionOut
 
 PROVIDER_MOCK = "mock"
@@ -30,6 +22,73 @@ PROVIDER_OPENAI = "openai"
 PROVIDER_ANTHROPIC = "anthropic"
 
 KNOWN_PROVIDERS: tuple[str, ...] = (PROVIDER_MOCK, PROVIDER_OPENAI, PROVIDER_ANTHROPIC)
+
+
+@dataclass
+class ProviderUsage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    latencies_ms: list[float] = field(default_factory=list)
+    calls: int = 0
+    retries: int = 0
+    transient_retry_attempts: int = 0
+    recovered_after_retry: int = 0
+    estimated_cost_usd: float | None = None
+    cost_note: str | None = None
+
+    def add_call(
+        self,
+        *,
+        latency_ms: float,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+    ) -> None:
+        self.calls += 1
+        self.latencies_ms.append(latency_ms)
+        if input_tokens is not None:
+            self.input_tokens += input_tokens
+        if output_tokens is not None:
+            self.output_tokens += output_tokens
+        self._refresh_estimated_cost()
+
+    def _refresh_estimated_cost(self) -> None:
+        input_price = _float_env("ABSA_INPUT_COST_PER_1M_TOKENS")
+        output_price = _float_env("ABSA_OUTPUT_COST_PER_1M_TOKENS")
+        if input_price is None or output_price is None:
+            return
+        self.estimated_cost_usd = round(
+            (self.input_tokens / 1_000_000) * input_price
+            + (self.output_tokens / 1_000_000) * output_price,
+            6,
+        )
+        self.cost_note = (
+            "Estimated from ABSA_INPUT_COST_PER_1M_TOKENS and "
+            "ABSA_OUTPUT_COST_PER_1M_TOKENS."
+        )
+
+    def as_dict(self, *, provider: str, model_name: str) -> dict[str, Any]:
+        latencies = sorted(self.latencies_ms)
+        p95 = None
+        avg = None
+        if latencies:
+            avg = round(sum(latencies) / len(latencies), 2)
+            idx = min(len(latencies) - 1, int((len(latencies) - 1) * 0.95))
+            p95 = round(latencies[idx], 2)
+        return {
+            "provider": provider,
+            "model_name": model_name,
+            "calls": self.calls,
+            "retries": self.retries,
+            "retry_attempts_total": self.transient_retry_attempts,
+            "recovered_after_retry": self.recovered_after_retry,
+            "total_input_tokens": self.input_tokens or None,
+            "total_output_tokens": self.output_tokens or None,
+            "estimated_cost_usd": self.estimated_cost_usd,
+            "cost_note": self.cost_note
+            or "No built-in price table; token counts are reported when the API returns them.",
+            "avg_latency_ms": avg,
+            "p95_latency_ms": p95,
+        }
 
 
 class ABSAProvider(ABC):
@@ -49,9 +108,18 @@ class ABSAProvider(ABC):
     provider: str = "abstract"
     model_name: str = "abstract"
 
+    def __init__(self) -> None:
+        self.usage = ProviderUsage()
+
     @property
     def name(self) -> str:
         return self.model_name
+
+    def usage_summary(self) -> dict[str, Any]:
+        return self.usage.as_dict(provider=self.provider, model_name=self.model_name)
+
+    def configure_retries(self, *, max_retries: int, base_seconds: float) -> None:
+        return None
 
     @abstractmethod
     def extract(self, review_text: str) -> ABSAOutput:
@@ -169,8 +237,13 @@ class MockABSAProvider(ABSAProvider):
     provider = PROVIDER_MOCK
     model_name = PROVIDER_MOCK
 
+    def __init__(self) -> None:
+        super().__init__()
+
     def extract(self, review_text: str) -> ABSAOutput:
+        start = time.perf_counter()
         if not review_text or not review_text.strip():
+            self.usage.add_call(latency_ms=(time.perf_counter() - start) * 1000)
             return ABSAOutput(aspects=[])
 
         mentions: list[AspectMentionOut] = []
@@ -195,21 +268,18 @@ class MockABSAProvider(ABSAProvider):
                     )
                     seen.add(rule.aspect_code)
                     break
-        return ABSAOutput(aspects=mentions)
+        out = ABSAOutput(aspects=mentions)
+        self.usage.add_call(latency_ms=(time.perf_counter() - start) * 1000)
+        return out
 
 
 class LLMABSAProvider(ABSAProvider):
-    """Real-LLM provider stub.
-
-    Construction requires the matching API key. ``extract`` is intentionally
-    not implemented in this milestone — the responsibility of M2A is to wire
-    up the contract, schema, validators, flow, and idempotency. Real-LLM
-    calls land in M2B alongside the 200-row labeled holdout.
-    """
+    """Real OpenAI / Anthropic ABSA provider with one retry on bad JSON."""
 
     provider = "llm"
 
     def __init__(self, backend: str, *, model: str | None = None) -> None:
+        super().__init__()
         backend = backend.lower()
         if backend not in (PROVIDER_OPENAI, PROVIDER_ANTHROPIC):
             raise ValueError(
@@ -223,17 +293,245 @@ class LLMABSAProvider(ABSAProvider):
                 f"environment. Configure it in .env or your shell, or use "
                 f"--provider mock for local runs."
             )
+        env_model = os.getenv("ABSA_MODEL")
+        default_model = "gpt-4o-mini" if backend == PROVIDER_OPENAI else "claude-3-5-haiku-latest"
         self.backend = backend
-        self.model = model
+        self.model = model or env_model or default_model
         self.provider = backend
-        self.model_name = model or f"llm:{backend}"
+        self.model_name = self.model
+        self.api_key = os.environ[env_key]
+        self.llm_max_retries = 2
+        self.llm_retry_base_seconds = 1.0
 
-    def extract(self, review_text: str) -> ABSAOutput:  # pragma: no cover - M2B
-        raise NotImplementedError(
-            "LLMABSAProvider.extract is not implemented in Milestone 2A. "
-            "Use --provider mock for the smoke run; real-LLM extraction is "
-            "scoped to Milestone 2B."
+    def configure_retries(self, *, max_retries: int, base_seconds: float) -> None:
+        self.llm_max_retries = max(0, int(max_retries))
+        self.llm_retry_base_seconds = max(0.0, float(base_seconds))
+
+    def extract(self, review_text: str) -> ABSAOutput:
+        if not review_text or not review_text.strip():
+            return ABSAOutput(aspects=[])
+
+        last_error: Exception | None = None
+        for attempt in range(2):
+            if attempt:
+                self.usage.retries += 1
+            try:
+                raw_text, usage, latency_ms = self._call_model_with_transient_retries(review_text)
+                self.usage.add_call(
+                    latency_ms=latency_ms,
+                    input_tokens=usage.get("input_tokens"),
+                    output_tokens=usage.get("output_tokens"),
+                )
+                return self._parse_json_output(raw_text)
+            except (json.JSONDecodeError, PydanticValidationError, ValueError) as exc:
+                last_error = exc
+                continue
+        raise RuntimeError(f"{self.backend} ABSA output failed JSON/schema validation after retry: {last_error}")
+
+    def _call_model_with_transient_retries(self, review_text: str) -> tuple[str, dict[str, int], float]:
+        last_error: Exception | None = None
+        for attempt in range(self.llm_max_retries + 1):
+            try:
+                result = self._call_model(review_text)
+                if attempt > 0:
+                    self.usage.recovered_after_retry += 1
+                return result
+            except TransientLLMError as exc:
+                last_error = exc
+                if attempt >= self.llm_max_retries:
+                    break
+                self.usage.transient_retry_attempts += 1
+                _sleep_with_backoff(self.llm_retry_base_seconds, attempt)
+        raise RuntimeError(f"LLM transient request failed after {self.llm_max_retries} retries: {last_error}")
+
+    def _call_model(self, review_text: str) -> tuple[str, dict[str, int], float]:
+        if self.backend == PROVIDER_OPENAI:
+            return self._call_openai(review_text)
+        return self._call_anthropic(review_text)
+
+    def _call_openai(self, review_text: str) -> tuple[str, dict[str, int], float]:
+        payload = {
+            "model": self.model,
+            "input": [
+                {"role": "system", "content": ABSA_SYSTEM_PROMPT},
+                {"role": "user", "content": build_user_prompt(review_text)},
+            ],
+            "temperature": 0,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "absa_output",
+                    "strict": True,
+                    "schema": _absa_json_schema(),
+                }
+            },
+        }
+        base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com").rstrip("/")
+        data, latency_ms = _post_json(
+            f"{base_url}/v1/responses",
+            payload,
+            {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
         )
+        text = data.get("output_text")
+        if not text:
+            text = _extract_openai_output_text(data)
+        usage_raw = data.get("usage") or {}
+        usage = {
+            "input_tokens": _coerce_int(
+                usage_raw.get("input_tokens") or usage_raw.get("prompt_tokens")
+            ),
+            "output_tokens": _coerce_int(
+                usage_raw.get("output_tokens") or usage_raw.get("completion_tokens")
+            ),
+        }
+        return text, usage, latency_ms
+
+    def _call_anthropic(self, review_text: str) -> tuple[str, dict[str, int], float]:
+        payload = {
+            "model": self.model,
+            "max_tokens": 900,
+            "temperature": 0,
+            "system": ABSA_SYSTEM_PROMPT,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": build_user_prompt(review_text)
+                    + '\n\nReturn JSON only. The first character must be "{".',
+                }
+            ],
+        }
+        base_url = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+        data, latency_ms = _post_json(
+            f"{base_url}/v1/messages",
+            payload,
+            {
+                "x-api-key": self.api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+        )
+        parts = data.get("content") or []
+        text = "".join(part.get("text", "") for part in parts if part.get("type") == "text")
+        usage_raw = data.get("usage") or {}
+        usage = {
+            "input_tokens": _coerce_int(usage_raw.get("input_tokens")),
+            "output_tokens": _coerce_int(usage_raw.get("output_tokens")),
+        }
+        return text, usage, latency_ms
+
+    def _parse_json_output(self, text: str) -> ABSAOutput:
+        payload = _extract_json_object(text)
+        return ABSAOutput.model_validate(payload)
+
+
+def _absa_json_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["aspects"],
+        "properties": {
+            "aspects": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["aspect_code", "sentiment", "severity", "evidence_quote"],
+                    "properties": {
+                        "aspect_code": {"type": "string", "enum": list(_ONTOLOGY_CODES())},
+                        "sentiment": {"type": "string", "enum": ["positive", "neutral", "negative"]},
+                        "severity": {
+                            "anyOf": [
+                                {"type": "string", "enum": ["low", "medium", "high"]},
+                                {"type": "null"},
+                            ]
+                        },
+                        "evidence_quote": {"type": "string", "minLength": 1},
+                    },
+                },
+            }
+        },
+    }
+
+
+def _ONTOLOGY_CODES() -> tuple[str, ...]:
+    from voicelens.nlp.absa.schema import ONTOLOGY_CODES_V1
+
+    return ONTOLOGY_CODES_V1
+
+
+class TransientLLMError(RuntimeError):
+    pass
+
+
+def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> tuple[dict[str, Any], float]:
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    start = time.perf_counter()
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        if exc.code in {408, 409, 425, 429, 500, 502, 503, 504}:
+            raise TransientLLMError(f"HTTP {exc.code}: {detail}") from exc
+        raise RuntimeError(f"LLM API request failed with HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise TransientLLMError(str(exc)) from exc
+    latency_ms = (time.perf_counter() - start) * 1000
+    return json.loads(raw), latency_ms
+
+
+def _sleep_with_backoff(base_seconds: float, attempt: int) -> None:
+    if base_seconds <= 0:
+        return
+    delay = base_seconds * (2**attempt)
+    jitter = random.uniform(0, base_seconds * 0.25)
+    time.sleep(delay + jitter)
+
+
+def _extract_openai_output_text(data: dict[str, Any]) -> str:
+    chunks: list[str] = []
+    for item in data.get("output") or []:
+        for content in item.get("content") or []:
+            if content.get("type") in {"output_text", "text"} and content.get("text"):
+                chunks.append(str(content["text"]))
+    return "".join(chunks)
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end < start:
+            raise
+        payload = json.loads(text[start : end + 1])
+    if not isinstance(payload, dict):
+        raise ValueError("ABSA provider returned JSON that is not an object")
+    return payload
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_env(key: str) -> float | None:
+    raw = os.getenv(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
 
 
 def get_provider(name: str | None = None, *, model: str | None = None) -> ABSAProvider:

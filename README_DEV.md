@@ -558,22 +558,23 @@ The mock provider always produces verbatim quotes, so
 run. A real LLM provider in M2B will drift below 1.0 and we will use
 that to tune the prompt.
 
-### 3. Switching to a real LLM provider (M2B placeholder)
+### 3. Switching to a real LLM provider
 
-`LLMABSAProvider` is wired but the call site is intentionally not
-implemented in this milestone. Configuring `ABSA_PROVIDER=openai` or
-`ABSA_PROVIDER=anthropic` without the matching API key fails fast with
-a clear error.
+M2B implements real OpenAI / Anthropic providers. Keep M2A mock smoke
+runs for plumbing checks, then use the M2B 100-review smoke before any
+larger batch. Configuring `ABSA_PROVIDER=openai` or
+`ABSA_PROVIDER=anthropic` without the matching API key fails fast with a
+clear error.
 
 ```bash
-# fails with a clear message in M2A
 python -m voicelens.pipeline.flows.absa_flow \
   --source amazon_reviews_2023_mvp_subset \
-  --limit 500 \
-  --provider openai
+  --limit 100 \
+  --provider openai \
+  --model ${ABSA_MODEL}
 ```
 
-Implementation lands in M2B; tests use only the mock.
+Tests still use only mock/fake providers; they do not call real APIs.
 
 ### 4. Idempotency and re-runs
 
@@ -721,11 +722,183 @@ scripts/
 
 - No embeddings, no Qdrant writes, no BERTopic, no anomaly detection.
 - No RAG, no LangGraph, no Streamlit.
-- No real-LLM calls — `LLMABSAProvider.extract` raises
-  `NotImplementedError`.
+- No real-LLM calls in M2A.
 - No ABSA on all 245k reviews — the smoke run is capped at 500.
 
-These ship in M2B (real-LLM ABSA + macro-F1 on holdout) and later.
+Real-LLM ABSA and macro-F1 on a labeled holdout ship in M2B.
+
+---
+
+## Milestone 2B: real LLM ABSA and evaluation
+
+This milestone enables controlled real-LLM ABSA and evaluation. Keep runs small until quality and cost are validated. Do **not** run ABSA over the full 245k MVP subset yet.
+
+### Configure API keys
+
+Set only the provider you intend to use:
+
+```bash
+ABSA_PROVIDER=openai
+OPENAI_API_KEY=...
+ABSA_MODEL=gpt-4o-mini
+
+# optional alternative
+ABSA_PROVIDER=anthropic
+ANTHROPIC_API_KEY=...
+ABSA_MODEL=claude-3-5-haiku-latest
+
+# optional API-compatible gateway
+ANTHROPIC_BASE_URL=https://api.anthropic.com
+```
+
+Keys are read from the environment / `.env`; they are never hardcoded. If a selected provider has no key, the provider fails fast with a clear message.
+
+### Safe real-LLM execution
+
+Use a staircase. Start with 20 reviews from the CLI, then the 100-review smoke, then the 1k batch. Never run the full 245k MVP subset until quality metrics and API spend are validated.
+
+```bash
+python -m voicelens.pipeline.flows.absa_flow \
+  --source amazon_reviews_2023_mvp_subset \
+  --limit 20 \
+  --provider anthropic \
+  --model ${ABSA_MODEL} \
+  --max-invalid-rate 0.10 \
+  --max-fail-rate 0.05 \
+  --max-cost-usd 1
+```
+
+Guardrails stop additional reviews without rolling back already inserted valid mentions/status rows:
+
+- `--max-cost-usd`: stops when provider-estimated cost exceeds the threshold, if cost is available.
+- `--max-invalid-rate`: defaults to `0.10`.
+- `--max-fail-rate`: defaults to `0.05`.
+- `--min-processed-for-rate-guardrail`: defaults to `50`, so one gateway blip in a tiny smoke batch does not stop the run before the rate is meaningful.
+- `--llm-max-retries`: defaults to `2` for transient gateway/network/rate-limit/server errors.
+- `--llm-retry-base-seconds`: defaults to `1.0` and uses exponential backoff with jitter.
+- `--no-stop-on-guardrail`: records the breach but continues; do not use this for first real runs.
+
+Gateway connection resets such as Windows `10054`, HTTP 429, and HTTP 5xx are treated as transient. The provider retries those before marking a review as `failed`. Model-output validation errors are separate: malformed JSON/schema issues use the existing one retry for output repair, and non-verbatim or out-of-ontology mentions are counted as invalid output rather than network failure.
+
+### Run a 100-review smoke
+
+Low-cost default:
+
+```bash
+make absa-llm-smoke
+# equivalent:
+python -m voicelens.pipeline.flows.absa_flow \
+  --source amazon_reviews_2023_mvp_subset \
+  --limit 100 \
+  --provider anthropic \
+  --model ${ABSA_MODEL} \
+  --llm-max-retries 2 \
+  --llm-retry-base-seconds 1.0 \
+  --min-processed-for-rate-guardrail 50 \
+  --max-invalid-rate 0.10 \
+  --max-fail-rate 0.05 \
+  --max-cost-usd 1
+```
+
+The flow remains idempotent through `absa_review_status`. Re-running with the same `(provider, model_name, aspect_version)` skips already processed reviews.
+
+### Run a 1k batch
+
+Warning: this spends real API credits. Run only after the 100-review smoke looks reasonable.
+
+```bash
+make absa-llm-1k
+```
+
+`make absa-llm-1k` uses `ABSA_MAX_COST_USD` from the environment, defaulting to `5`.
+
+The summary includes provider/model metadata and usage fields when the API returns them:
+
+```json
+{
+  "provider": "openai",
+  "model_name": "gpt-4o-mini",
+  "provider_usage": {
+    "total_input_tokens": 12345,
+    "total_output_tokens": 678,
+    "estimated_cost_usd": null,
+    "avg_latency_ms": 900.1,
+    "p95_latency_ms": 1400.2
+  }
+}
+```
+
+`estimated_cost_usd` is `null` unless a reliable local price table exists; token counts are reported when the API returns them.
+
+### Create the labeled holdout
+
+First generate the seed file if needed:
+
+```bash
+make sample-absa-holdout
+```
+
+Then copy:
+
+```
+data/labeling/absa_holdout_seed.jsonl
+```
+
+to:
+
+```
+data/labeling/absa_holdout_labeled.jsonl
+```
+
+Fill each row's `gold_aspects` manually using the same schema as provider output:
+
+```json
+{
+  "aspect_code": "battery",
+  "sentiment": "negative",
+  "severity": "medium",
+  "evidence_quote": "battery stopped working"
+}
+```
+
+### Export predictions for labeling review
+
+After a real-LLM run over the holdout review IDs:
+
+```bash
+make export-absa-predictions
+# equivalent:
+python scripts/export_absa_predictions_for_labeling.py --model ${ABSA_MODEL}
+```
+
+Writes:
+
+```
+data/labeling/absa_holdout_predictions.jsonl
+```
+
+Each row includes review metadata, `gold_aspects`, `predicted_aspects`, and `validation_errors`.
+
+### Run evaluation
+
+```bash
+make evaluate-absa
+# equivalent:
+python scripts/evaluate_absa.py
+```
+
+If `data/labeling/absa_holdout_labeled.jsonl` is missing, the script tells you exactly which seed file to copy and label.
+
+Metrics include:
+
+- aspect extraction precision / recall / micro-F1 / macro-F1
+- sentiment accuracy and Cohen's kappa
+- severity accuracy on negative mentions
+- evidence quote verbatim rate
+- invalid output rate
+- per-aspect TP / FP / FN and confusion summary
+
+Do not scale beyond the 1k batch until these metrics and the API bill look acceptable.
 
 ---
 

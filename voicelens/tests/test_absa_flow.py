@@ -340,6 +340,7 @@ def test_invalid_output_is_recorded_as_invalid(seeded_engine, monkeypatch):
     summary = absa_flow(
         source="amazon_reviews_2023_mvp_subset",
         provider=AlwaysInvalidProvider(),
+        max_invalid_rate=None,
     )
 
     assert summary["invalid_reviews"] == len(REVIEW_TEXTS)
@@ -382,7 +383,7 @@ def test_failed_provider_is_recorded_as_failed(seeded_engine):
             raise RuntimeError("provider blew up")
 
     summary = absa_flow(
-        source="amazon_reviews_2023_mvp_subset", provider=ExplodingProvider()
+        source="amazon_reviews_2023_mvp_subset", provider=ExplodingProvider(), max_fail_rate=None
     )
 
     assert summary["failed_reviews"] == len(REVIEW_TEXTS)
@@ -440,3 +441,142 @@ def test_processed_coverage_rate_visible_in_summary(seeded_engine):
     assert summary["reviews_with_mentions"] + summary["reviews_no_mentions"] \
         + summary["invalid_reviews"] + summary["failed_reviews"] \
         == summary["processed_reviews"]
+
+
+def test_cost_guardrail_stops_processing(seeded_engine):
+    from voicelens.nlp.absa.providers import MockABSAProvider
+
+    class CostlyProvider(MockABSAProvider):
+        provider = "openai"
+        model_name = "costly-test"
+
+        def extract(self, review_text: str):
+            out = super().extract(review_text)
+            self.usage.estimated_cost_usd = 0.02
+            return out
+
+    summary = absa_flow(
+        source="amazon_reviews_2023_mvp_subset",
+        provider=CostlyProvider(),
+        max_cost_usd=0.01,
+    )
+
+    assert summary["processed_reviews"] == 1
+    assert summary["guardrail_triggered"] is True
+    assert "estimated_cost_usd" in summary["guardrail_reason"]
+
+
+def test_invalid_rate_guardrail_stops_processing(seeded_engine):
+    from voicelens.nlp.absa.providers import MockABSAProvider
+    from voicelens.nlp.absa.schema import ABSAOutput, AspectMentionOut
+
+    class InvalidProvider(MockABSAProvider):
+        provider = "openai"
+        model_name = "invalid-rate-test"
+
+        def extract(self, review_text: str) -> ABSAOutput:
+            return ABSAOutput(
+                aspects=[
+                    AspectMentionOut(
+                        aspect_code="battery",
+                        sentiment="negative",
+                        severity="low",
+                        evidence_quote="not a verbatim quote",
+                    )
+                ]
+            )
+
+    summary = absa_flow(
+        source="amazon_reviews_2023_mvp_subset",
+        provider=InvalidProvider(),
+        max_invalid_rate=0.10,
+        min_processed_for_rate_guardrail=1,
+    )
+
+    assert summary["processed_reviews"] == 1
+    assert summary["invalid_reviews"] == 1
+    assert summary["guardrail_triggered"] is True
+    assert "invalid_rate" in summary["guardrail_reason"]
+
+
+def test_fail_rate_guardrail_stops_processing(seeded_engine):
+    from voicelens.nlp.absa.providers import ABSAProvider
+    from voicelens.nlp.absa.schema import ABSAOutput
+
+    class FailingProvider(ABSAProvider):
+        provider = "anthropic"
+        model_name = "fail-rate-test"
+
+        def extract(self, review_text: str) -> ABSAOutput:
+            raise RuntimeError("boom")
+
+    summary = absa_flow(
+        source="amazon_reviews_2023_mvp_subset",
+        provider=FailingProvider(),
+        max_fail_rate=0.05,
+        min_processed_for_rate_guardrail=1,
+    )
+
+    assert summary["processed_reviews"] == 1
+    assert summary["failed_reviews"] == 1
+    assert summary["guardrail_triggered"] is True
+    assert "fail_rate" in summary["guardrail_reason"]
+
+
+def test_fail_rate_guardrail_waits_for_min_processed(seeded_engine):
+    from voicelens.nlp.absa.providers import ABSAProvider
+    from voicelens.nlp.absa.schema import ABSAOutput
+
+    class FailingProvider(ABSAProvider):
+        provider = "anthropic"
+        model_name = "fail-before-min-test"
+
+        def extract(self, review_text: str) -> ABSAOutput:
+            raise RuntimeError("boom")
+
+    summary = absa_flow(
+        source="amazon_reviews_2023_mvp_subset",
+        provider=FailingProvider(),
+        max_fail_rate=0.05,
+        min_processed_for_rate_guardrail=50,
+    )
+
+    assert summary["processed_reviews"] == len(REVIEW_TEXTS)
+    assert summary["failed_reviews"] == len(REVIEW_TEXTS)
+    assert summary["guardrail_triggered"] is False
+    assert summary["min_processed_for_rate_guardrail"] == 50
+
+
+def test_fail_rate_guardrail_triggers_after_min_processed(seeded_engine):
+    from voicelens.nlp.absa.providers import ABSAProvider
+    from voicelens.nlp.absa.schema import ABSAOutput
+
+    class FailingProvider(ABSAProvider):
+        provider = "anthropic"
+        model_name = "fail-after-min-test"
+
+        def extract(self, review_text: str) -> ABSAOutput:
+            raise RuntimeError("boom")
+
+    summary = absa_flow(
+        source="amazon_reviews_2023_mvp_subset",
+        provider=FailingProvider(),
+        max_fail_rate=0.05,
+        min_processed_for_rate_guardrail=3,
+    )
+
+    assert summary["processed_reviews"] == 3
+    assert summary["failed_reviews"] == 3
+    assert summary["guardrail_triggered"] is True
+    assert "fail_rate" in summary["guardrail_reason"]
+
+
+def test_guardrail_summary_defaults_to_not_triggered(seeded_engine):
+    summary = absa_flow(
+        source="amazon_reviews_2023_mvp_subset",
+        provider="mock",
+        limit=1,
+    )
+
+    assert summary["guardrail_triggered"] is False
+    assert summary["guardrail_reason"] is None

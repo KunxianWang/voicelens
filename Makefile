@@ -3,9 +3,13 @@
         scan-amazon-brands scan-amazon-brand-reviews generate-brand-allowlist profile-amazon-dataset \
         build-mvp-subset ingest-mvp-subset \
         seed-aspects absa-smoke absa-stats sample-absa-holdout \
+        absa-llm-smoke absa-llm-1k export-absa-predictions evaluate-absa \
         test lint install
 
 PYTHON ?= python
+ABSA_LLM_PROVIDER ?= anthropic
+ABSA_MODEL ?= claude-opus-4.6
+ABSA_MAX_COST_USD ?= 5
 
 help:
 	@echo "Targets:"
@@ -25,8 +29,12 @@ help:
 	@echo "  ingest-mvp-subset        ingest data/amazon_mvp_reviews.jsonl.gz into Postgres"
 	@echo "  seed-aspects             seed aspect_ontology v1 (idempotent)"
 	@echo "  absa-smoke               run absa_flow with MockABSAProvider on first 500 MVP-subset reviews"
+	@echo "  absa-llm-smoke           run real LLM ABSA on 100 MVP-subset reviews"
+	@echo "  absa-llm-1k              run real LLM ABSA on 1000 MVP-subset reviews"
 	@echo "  absa-stats               print aspect_mention coverage / distribution / verbatim rate"
 	@echo "  sample-absa-holdout      write data/labeling/absa_holdout_seed.jsonl for manual labeling"
+	@echo "  export-absa-predictions  write data/labeling/absa_holdout_predictions.jsonl"
+	@echo "  evaluate-absa            score labeled holdout against predictions"
 	@echo "  db-stats                 print review / brand / rating / DQ counts"
 	@echo "  test                     run pytest (uses SQLite in-memory)"
 	@echo "  lint                     ruff check"
@@ -97,11 +105,43 @@ absa-smoke:
 	  --limit 500 \
 	  --provider mock
 
+absa-llm-smoke:
+	$(PYTHON) -m voicelens.pipeline.flows.absa_flow \
+	  --source amazon_reviews_2023_mvp_subset \
+	  --limit 100 \
+	  --provider "$(ABSA_LLM_PROVIDER)" \
+	  --model "$(ABSA_MODEL)" \
+	  --llm-max-retries 2 \
+	  --llm-retry-base-seconds 1.0 \
+	  --min-processed-for-rate-guardrail 50 \
+	  --max-invalid-rate 0.10 \
+	  --max-fail-rate 0.05 \
+	  --max-cost-usd 1
+
+absa-llm-1k:
+	$(PYTHON) -m voicelens.pipeline.flows.absa_flow \
+	  --source amazon_reviews_2023_mvp_subset \
+	  --limit 1000 \
+	  --provider "$(ABSA_LLM_PROVIDER)" \
+	  --model "$(ABSA_MODEL)" \
+	  --llm-max-retries 2 \
+	  --llm-retry-base-seconds 1.0 \
+	  --min-processed-for-rate-guardrail 50 \
+	  --max-invalid-rate 0.10 \
+	  --max-fail-rate 0.05 \
+	  --max-cost-usd "$(ABSA_MAX_COST_USD)"
+
 absa-stats:
 	$(PYTHON) scripts/absa_stats.py
 
 sample-absa-holdout:
 	$(PYTHON) scripts/sample_absa_holdout.py --source amazon_reviews_2023_mvp_subset
+
+export-absa-predictions:
+	$(PYTHON) scripts/export_absa_predictions_for_labeling.py --model "$(ABSA_MODEL)"
+
+evaluate-absa:
+	$(PYTHON) scripts/evaluate_absa.py
 
 test:
 	$(PYTHON) -m pytest

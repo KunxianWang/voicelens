@@ -7,7 +7,7 @@ from voicelens.nlp.absa import (
     MockABSAProvider,
     get_provider,
 )
-from voicelens.nlp.absa.providers import LLMABSAProvider
+from voicelens.nlp.absa.providers import LLMABSAProvider, TransientLLMError
 from voicelens.nlp.absa.schema import ABSAOutput
 
 
@@ -93,11 +93,12 @@ def test_llm_provider_rejects_unknown_backend(monkeypatch):
         LLMABSAProvider("not-a-backend")
 
 
-def test_llm_provider_extract_not_implemented_m2a(monkeypatch):
+def test_llm_provider_uses_model_env(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("ABSA_MODEL", "gpt-test")
     provider = LLMABSAProvider("openai")
     assert isinstance(provider, LLMABSAProvider)
-    assert provider.name == "llm:openai"
+    assert provider.name == "gpt-test"
 
 
 def test_get_provider_returns_llm_when_env_set(monkeypatch):
@@ -106,6 +107,108 @@ def test_get_provider_returns_llm_when_env_set(monkeypatch):
     provider = get_provider()
     assert isinstance(provider, LLMABSAProvider)
     assert provider.backend == "anthropic"
+
+
+def test_provider_factory_selects_openai(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    provider = get_provider("openai", model="gpt-test")
+    assert isinstance(provider, LLMABSAProvider)
+    assert provider.provider == "openai"
+    assert provider.model_name == "gpt-test"
+
+
+def test_llm_provider_recovers_after_one_malformed_output(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    class FlakyProvider(LLMABSAProvider):
+        def __init__(self) -> None:
+            super().__init__("openai", model="gpt-test")
+            self.calls = 0
+
+        def _call_model(self, review_text: str):
+            self.calls += 1
+            if self.calls == 1:
+                return "not json", {}, 10.0
+            return (
+                {
+                    "aspects": [
+                        {
+                            "aspect_code": "battery",
+                            "sentiment": "negative",
+                            "severity": "low",
+                            "evidence_quote": "battery is bad",
+                        }
+                    ]
+                },
+                {},
+                12.0,
+            )
+
+        def _parse_json_output(self, text):
+            if isinstance(text, dict):
+                return ABSAOutput.model_validate(text)
+            return super()._parse_json_output(text)
+
+    out = FlakyProvider().extract("battery is bad")
+    assert out.aspects[0].aspect_code == "battery"
+
+
+def test_malformed_llm_output_fails_after_retry(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    class BadProvider(LLMABSAProvider):
+        def __init__(self) -> None:
+            super().__init__("openai", model="gpt-test")
+
+        def _call_model(self, review_text: str):
+            return "not json", {}, 1.0
+
+    with pytest.raises(RuntimeError, match="failed JSON/schema validation"):
+        BadProvider().extract("battery is bad")
+
+
+def test_transient_failure_succeeds_after_one_retry(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    class TransientThenOk(LLMABSAProvider):
+        def __init__(self) -> None:
+            super().__init__("openai", model="gpt-test")
+            self.calls = 0
+            self.configure_retries(max_retries=2, base_seconds=0)
+
+        def _call_model(self, review_text: str):
+            self.calls += 1
+            if self.calls == 1:
+                raise TransientLLMError("connection reset")
+            return '{"aspects":[]}', {}, 1.0
+
+    provider = TransientThenOk()
+    out = provider.extract("no aspects here")
+
+    assert out.aspects == []
+    assert provider.calls == 2
+    assert provider.usage.transient_retry_attempts == 1
+    assert provider.usage.recovered_after_retry == 1
+
+
+def test_persistent_transient_failure_raises_after_retries(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    class AlwaysTransient(LLMABSAProvider):
+        def __init__(self) -> None:
+            super().__init__("openai", model="gpt-test")
+            self.calls = 0
+            self.configure_retries(max_retries=2, base_seconds=0)
+
+        def _call_model(self, review_text: str):
+            self.calls += 1
+            raise TransientLLMError("connection reset")
+
+    provider = AlwaysTransient()
+    with pytest.raises(RuntimeError, match="transient request failed"):
+        provider.extract("battery")
+    assert provider.calls == 3
+    assert provider.usage.transient_retry_attempts == 2
 
 
 def test_mock_provider_output_is_pydantic_abas_output():

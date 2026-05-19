@@ -178,7 +178,69 @@ def _summary_skeleton() -> dict[str, Any]:
             ERR_NON_VERBATIM: 0,
             ERR_DUPLICATE_ASPECT: 0,
         },
+        "guardrail_triggered": False,
+        "guardrail_reason": None,
     }
+
+
+def _attach_provider_usage(summary: dict[str, Any], provider: ABSAProvider) -> None:
+    usage = provider.usage_summary()
+    summary["provider_usage"] = usage
+    summary["total_input_tokens"] = usage.get("total_input_tokens")
+    summary["total_output_tokens"] = usage.get("total_output_tokens")
+    summary["estimated_cost_usd"] = usage.get("estimated_cost_usd")
+    summary["avg_latency_ms"] = usage.get("avg_latency_ms")
+    summary["p95_latency_ms"] = usage.get("p95_latency_ms")
+
+
+def _guardrail_reason(
+    summary: dict[str, Any],
+    provider: ABSAProvider,
+    *,
+    max_cost_usd: float | None,
+    max_invalid_rate: float | None,
+    max_fail_rate: float | None,
+    min_processed_for_rate_guardrail: int,
+) -> str | None:
+    processed = int(summary.get("processed_reviews") or 0)
+    usage = provider.usage_summary()
+    estimated_cost = usage.get("estimated_cost_usd")
+    if max_cost_usd is not None and estimated_cost is not None and estimated_cost > max_cost_usd:
+        return f"estimated_cost_usd {estimated_cost:.4f} exceeded max_cost_usd {max_cost_usd:.4f}"
+    if processed >= min_processed_for_rate_guardrail and max_invalid_rate is not None:
+        invalid_rate = float(summary.get("invalid_reviews") or 0) / processed
+        if invalid_rate > max_invalid_rate:
+            return f"invalid_rate {invalid_rate:.4f} exceeded max_invalid_rate {max_invalid_rate:.4f}"
+    if processed >= min_processed_for_rate_guardrail and max_fail_rate is not None:
+        fail_rate = float(summary.get("failed_reviews") or 0) / processed
+        if fail_rate > max_fail_rate:
+            return f"fail_rate {fail_rate:.4f} exceeded max_fail_rate {max_fail_rate:.4f}"
+    return None
+
+
+def _check_guardrails(
+    summary: dict[str, Any],
+    provider: ABSAProvider,
+    *,
+    max_cost_usd: float | None,
+    max_invalid_rate: float | None,
+    max_fail_rate: float | None,
+    min_processed_for_rate_guardrail: int,
+    stop_on_guardrail: bool,
+) -> bool:
+    reason = _guardrail_reason(
+        summary,
+        provider,
+        max_cost_usd=max_cost_usd,
+        max_invalid_rate=max_invalid_rate,
+        max_fail_rate=max_fail_rate,
+        min_processed_for_rate_guardrail=min_processed_for_rate_guardrail,
+    )
+    if reason is None:
+        return False
+    summary["guardrail_triggered"] = True
+    summary["guardrail_reason"] = reason
+    return stop_on_guardrail
 
 
 def _record_status(
@@ -233,12 +295,20 @@ def absa_flow(
     aspect_version: str = DEFAULT_ONTOLOGY_VERSION,
     model: str | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    max_cost_usd: float | None = None,
+    max_invalid_rate: float | None = 0.10,
+    max_fail_rate: float | None = 0.05,
+    stop_on_guardrail: bool = True,
+    llm_max_retries: int = 2,
+    llm_retry_base_seconds: float = 1.0,
+    min_processed_for_rate_guardrail: int = 50,
 ) -> dict[str, Any]:
     try:
         logger = get_run_logger()
     except Exception:  # pragma: no cover - prefect context missing
         logger = logging.getLogger("absa_flow")
     absa: ABSAProvider = provider if isinstance(provider, ABSAProvider) else get_provider(provider, model=model)
+    absa.configure_retries(max_retries=llm_max_retries, base_seconds=llm_retry_base_seconds)
     provider_name = absa.provider
     model_name = absa.model_name
 
@@ -246,6 +316,7 @@ def absa_flow(
     sentiment_counts: Counter[str] = Counter()
     severity_counts: Counter[str] = Counter()
     summary = _summary_skeleton()
+    summary["min_processed_for_rate_guardrail"] = min_processed_for_rate_guardrail
 
     raw_quote_total = 0
 
@@ -274,6 +345,9 @@ def absa_flow(
             summary["provider"] = provider_name
             summary["model_name"] = model_name
             summary["aspect_version"] = aspect_version
+            summary["retry_attempts_total"] = 0
+            summary["recovered_after_retry"] = 0
+            _attach_provider_usage(summary, absa)
             return summary
 
         if force:
@@ -284,7 +358,10 @@ def absa_flow(
             len(review_ids), provider_name, model_name, force, aspect_version,
         )
 
+        stop_processing = False
         for start in range(0, len(review_ids), batch_size):
+            if stop_processing:
+                break
             batch_ids = review_ids[start : start + batch_size]
             reviews = list(
                 session.execute(
@@ -316,6 +393,17 @@ def absa_flow(
                         n_errors=0,
                         error_codes={"exception": type(exc).__name__},
                     )
+                    stop_processing = _check_guardrails(
+                        summary,
+                        absa,
+                        max_cost_usd=max_cost_usd,
+                        max_invalid_rate=max_invalid_rate,
+                        max_fail_rate=max_fail_rate,
+                        min_processed_for_rate_guardrail=min_processed_for_rate_guardrail,
+                        stop_on_guardrail=stop_on_guardrail,
+                    )
+                    if stop_processing:
+                        break
                     continue
 
                 raw_quote_total += outcome.raw_aspect_count
@@ -372,6 +460,17 @@ def absa_flow(
                     n_errors=len(outcome.result.errors),
                     error_codes=error_codes or None,
                 )
+                stop_processing = _check_guardrails(
+                    summary,
+                    absa,
+                    max_cost_usd=max_cost_usd,
+                    max_invalid_rate=max_invalid_rate,
+                    max_fail_rate=max_fail_rate,
+                    min_processed_for_rate_guardrail=min_processed_for_rate_guardrail,
+                    stop_on_guardrail=stop_on_guardrail,
+                )
+                if stop_processing:
+                    break
             session.flush()
 
     non_verbatim = summary["validation_errors"].get(ERR_NON_VERBATIM, 0)
@@ -382,9 +481,13 @@ def absa_flow(
     summary["sentiment_counts"] = dict(sentiment_counts.most_common())
     summary["severity_counts"] = dict(severity_counts.most_common())
     summary["raw_aspect_candidates"] = raw_quote_total
+    usage = absa.usage_summary()
+    summary["retry_attempts_total"] = usage.get("retry_attempts_total")
+    summary["recovered_after_retry"] = usage.get("recovered_after_retry")
     summary["provider"] = provider_name
     summary["model_name"] = model_name
     summary["aspect_version"] = aspect_version
+    _attach_provider_usage(summary, absa)
     return summary
 
 
@@ -396,6 +499,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model", default=None, help="Optional model identifier passed to provider")
     parser.add_argument("--aspect-version", default=DEFAULT_ONTOLOGY_VERSION, help="aspect_ontology.version to target")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Reviews per DB fetch batch")
+    parser.add_argument("--max-cost-usd", type=float, default=None, help="Stop when estimated provider cost exceeds this amount, if cost is available")
+    parser.add_argument("--max-invalid-rate", type=float, default=0.10, help="Stop when invalid review rate exceeds this threshold")
+    parser.add_argument("--max-fail-rate", type=float, default=0.05, help="Stop when provider failure rate exceeds this threshold")
+    parser.add_argument("--llm-max-retries", type=int, default=2, help="Max retries for transient LLM gateway/network errors")
+    parser.add_argument("--llm-retry-base-seconds", type=float, default=1.0, help="Base seconds for exponential retry backoff")
+    parser.add_argument("--min-processed-for-rate-guardrail", type=int, default=50, help="Do not evaluate invalid/fail-rate guardrails until this many reviews are processed")
+    parser.add_argument("--stop-on-guardrail", dest="stop_on_guardrail", action="store_true", default=True, help="Stop processing when a guardrail is exceeded")
+    parser.add_argument("--no-stop-on-guardrail", dest="stop_on_guardrail", action="store_false", help="Record guardrail breach but continue processing")
     parser.add_argument("--force", action="store_true", help="Reprocess reviews even if they already have a status row for this provider+version")
     return parser.parse_args(argv)
 
@@ -410,6 +521,13 @@ def main(argv: list[str] | None = None) -> int:
         aspect_version=args.aspect_version,
         model=args.model,
         batch_size=args.batch_size,
+        max_cost_usd=args.max_cost_usd,
+        max_invalid_rate=args.max_invalid_rate,
+        max_fail_rate=args.max_fail_rate,
+        stop_on_guardrail=args.stop_on_guardrail,
+        llm_max_retries=args.llm_max_retries,
+        llm_retry_base_seconds=args.llm_retry_base_seconds,
+        min_processed_for_rate_guardrail=args.min_processed_for_rate_guardrail,
     )
     print(json.dumps(summary, indent=2, sort_keys=True, ensure_ascii=False))
     return 0
