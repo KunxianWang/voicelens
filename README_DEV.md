@@ -1262,6 +1262,116 @@ so existing notebooks / CI continue to read.
 
 ---
 
+## Milestone 3B: Retrieval evaluation
+
+M3A made the index queryable. M3B measures **how well** the index
+answers the kinds of questions the dashboard / RAG layer will ask, so
+we don't ship a chat UI on top of a retriever that doesn't surface the
+right reviews. The harness here is the gate before we promote to the
+245k pass + the LangGraph layer.
+
+### Why retrieval eval comes before RAG
+
+A bad retriever poisons the rest of the pipeline silently: the LLM
+will generate plausible answers even if the top-K passages don't
+contain the right evidence. Measuring Recall@5 / Recall@20 / MRR@10
+on a fixed golden set first means later RAG eval attributes failures
+to the retriever or the generator, not both.
+
+### Build the weakly supervised golden set
+
+```bash
+make build-retrieval-goldens
+# writes data/eval/retrieval_goldens.jsonl
+```
+
+For each of ~50 natural-language query templates (covering all 8 v2
+aspects + a few brand-specific facets) the script joins
+``aspect_mention`` rows by ``(expected_aspect, expected_sentiment)``
+and filters by a small per-template phrase list against
+``evidence_quote``. The result is up to 10 review_ids per query.
+
+**The goldens are weakly supervised.** They're seeded from the ABSA
+pipeline's own outputs, so the eval primarily measures retrieval
+*consistency* relative to the LLM's labels, not strict ground truth.
+A human pass can edit the JSONL freely — re-running the script only
+overwrites it.
+
+### Run dense retrieval eval (M3A baseline)
+
+```bash
+make evaluate-retrieval-dense
+# python scripts/evaluate_retrieval.py --mode dense
+```
+
+Writes:
+
+- ``data/eval/retrieval_eval_results.csv`` — one row per query, with
+  recall@{5,10,20}, ndcg@{5,10,20}, mrr@10, filter_precision@10.
+- ``data/eval/retrieval_eval_summary.json`` — aggregates plus error
+  breakdown and overall hit counts at K=5/10/20.
+- ``data/eval/retrieval_errors.csv`` — one row per query with hit
+  flags, top-result aspect / brand, and an ``error_type`` (see below).
+
+### Run lexical and hybrid eval
+
+```bash
+make evaluate-retrieval-lexical   # BM25 over the same corpus
+make evaluate-retrieval-hybrid    # RRF fusion of dense + lexical
+```
+
+The lexical retriever is BM25 (rank_bm25) over the same
+``build_embedding_text`` string the dense embedder saw, so the two
+sides compete on the same input distribution. Hybrid mode fuses with
+Reciprocal Rank Fusion (k=60, oversample 50).
+
+### Metric definitions
+
+| metric | definition |
+|---|---|
+| Recall@K | fraction of gold review_ids present in the top-K |
+| MRR@10 | mean reciprocal rank of the first gold hit in top-10 |
+| NDCG@K | binary-relevance NDCG with log2-position discount |
+| filter_precision@10 | among the top-10, the fraction that match the expected aspect/sentiment/brand (skipped when no expectation is set) |
+
+### Promotion gates for moving to Milestone 4
+
+These are minimums on the dense baseline; hybrid should match or beat
+them on every metric.
+
+| metric | gate |
+|---|---|
+| Recall@5 | ≥ 0.60 |
+| Recall@20 | ≥ 0.80 |
+| MRR@10 | ≥ 0.50 |
+
+If any gate fails, iterate the retriever (or refine the goldens)
+before turning on the LangGraph supervisor.
+
+### Inspect retrieval_errors.csv
+
+```
+query_id, query, expected_aspect, expected_sentiment,
+gold_review_ids, retrieved_review_ids, hit_at_5, hit_at_10, hit_at_20,
+top_result_aspects, top_result_brand, error_type
+```
+
+``error_type`` is one of:
+
+| error_type | meaning |
+|---|---|
+| ``good`` | at least one gold review_id in the top-10 |
+| ``filter_too_strict`` | unfiltered ranking had a gold hit in top-10 but the filter cut it |
+| ``wrong_aspect`` | top-1's aspect set doesn't include ``expected_aspect`` |
+| ``wrong_sentiment`` | top-1's sentiments don't include ``expected_sentiment`` |
+| ``lexical_miss`` | dense mode, no gold even in top-50 (vocabulary mismatch) |
+| ``no_gold_hit`` | catch-all when none of the more specific buckets apply |
+
+Sort the CSV by ``error_type`` to find the dominant prompt / index
+iteration target.
+
+---
+
 ## Not yet implemented (intentionally)
 
 - Real-LLM ABSA over the full 245k MVP subset.

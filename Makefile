@@ -6,6 +6,8 @@
         absa-llm-smoke absa-llm-1k absa-llm-holdout-50 export-absa-predictions evaluate-absa \
         validate-absa-labels evaluate-absa-50 export-absa-errors \
         embed-mock-smoke embed-v2-1k retrieval-smoke qdrant-stats \
+        build-retrieval-goldens evaluate-retrieval-dense evaluate-retrieval-lexical \
+        evaluate-retrieval-hybrid retrieval-errors \
         test lint install
 
 PYTHON ?= python
@@ -49,6 +51,11 @@ help:
 	@echo "  embed-v2-1k              embed up to 1000 v2 ABSA-processed reviews into Qdrant"
 	@echo "  retrieval-smoke          run a sample query against the Qdrant collection"
 	@echo "  qdrant-stats             print collection size + aspect/sentiment distributions"
+	@echo "  build-retrieval-goldens  generate the weakly-supervised retrieval golden set"
+	@echo "  evaluate-retrieval-dense run retrieval eval (dense / sentence-transformers)"
+	@echo "  evaluate-retrieval-lexical run retrieval eval (BM25 lexical baseline)"
+	@echo "  evaluate-retrieval-hybrid  run retrieval eval (RRF dense+lexical hybrid)"
+	@echo "  retrieval-errors         alias: dense eval and print errors CSV path"
 	@echo "  db-stats                 print review / brand / rating / DQ counts"
 	@echo "  test                     run pytest (uses SQLite in-memory)"
 	@echo "  lint                     ruff check"
@@ -198,6 +205,34 @@ retrieval-smoke:
 	  --embedding-provider "$(EMBEDDING_PROVIDER)" \
 	  --embedding-model "$(EMBEDDING_MODEL)" \
 	  --query "product stopped working after a week" --limit 5
+
+build-retrieval-goldens:
+	$(PYTHON) scripts/build_retrieval_goldens.py \
+	  --aspect-version "$(ABSA_ASPECT_VERSION)" \
+	  --provider "$(ABSA_LLM_PROVIDER)" \
+	  --model "$(ABSA_MODEL)" \
+	  --per-query 10
+
+evaluate-retrieval-dense:
+	$(PYTHON) scripts/evaluate_retrieval.py --mode dense \
+	  --collection "$(QDRANT_COLLECTION)" \
+	  --embedding-provider "$(EMBEDDING_PROVIDER)" \
+	  --embedding-model "$(EMBEDDING_MODEL)"
+
+evaluate-retrieval-lexical:
+	$(PYTHON) scripts/evaluate_retrieval.py --mode lexical \
+	  --collection "$(QDRANT_COLLECTION)" \
+	  --embedding-provider "$(EMBEDDING_PROVIDER)" \
+	  --embedding-model "$(EMBEDDING_MODEL)"
+
+evaluate-retrieval-hybrid:
+	$(PYTHON) scripts/evaluate_retrieval.py --mode hybrid \
+	  --collection "$(QDRANT_COLLECTION)" \
+	  --embedding-provider "$(EMBEDDING_PROVIDER)" \
+	  --embedding-model "$(EMBEDDING_MODEL)"
+
+retrieval-errors: evaluate-retrieval-dense
+	@echo "Inspect data/eval/retrieval_errors.csv (sort by error_type)"
 
 evaluate-absa:
 	$(PYTHON) scripts/evaluate_absa.py

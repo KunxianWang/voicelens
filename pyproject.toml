@@ -31,6 +31,11 @@ retrieval = [
     # an optional extra so the base install stays lightweight and the
     # mock-embedding test path doesn't drag torch into CI.
     "sentence-transformers>=3.0",
+    # Used by the M3B BM25 lexical baseline + RRF hybrid retriever. Tiny
+    # pure-Python implementation; ships alongside sentence-transformers
+    # so a single `pip install -e .[retrieval]` brings up everything
+    # needed for both indexing and the evaluation harness.
+    "rank_bm25>=0.2",
 ]
 
 [tool.setuptools.packages.find]
