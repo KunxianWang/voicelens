@@ -204,11 +204,71 @@ def test_hybrid_eval_runs_and_emits_error_rows(indexed_client):
     }
 
 
+def test_lexical_first_preserves_lexical_top_result(indexed_client):
+    """lexical_first must keep the lexical ranking's #1 hit at the top."""
+    client, collection, embedder, payloads = indexed_client
+    bm25 = BM25LexicalRetriever(payloads)
+    goldens = [
+        {
+            "query_id": "rel-stopped", "query": "STOPPED working week",
+            "expected_aspect": "reliability", "expected_sentiment": "negative",
+            "expected_brand": None, "gold_review_ids": [1, 2],
+        },
+    ]
+    lex = evaluate_retrieval(
+        goldens=goldens, mode="lexical", client=client, collection=collection,
+        embedder=embedder, bm25=bm25, limit=5,
+    )
+    lex_first = evaluate_retrieval(
+        goldens=goldens, mode="lexical_first", client=client, collection=collection,
+        embedder=embedder, bm25=bm25, limit=5,
+    )
+    lex_top = json.loads(lex["errors"][0]["retrieved_review_ids"])
+    lf_top = json.loads(lex_first["errors"][0]["retrieved_review_ids"])
+    # The lexical primary ranking leads the lexical_first fused order.
+    assert lf_top[0] == lex_top[0]
+    assert lex_first["summary"]["mode"] == "lexical_first"
+
+
+def test_hybrid_weighted_runs_and_records_weights(indexed_client):
+    client, collection, embedder, payloads = indexed_client
+    bm25 = BM25LexicalRetriever(payloads)
+    goldens = [
+        {
+            "query_id": "rel-stopped", "query": "STOPPED working",
+            "expected_aspect": "reliability", "expected_sentiment": "negative",
+            "expected_brand": None, "gold_review_ids": [1, 2],
+        },
+    ]
+    result = evaluate_retrieval(
+        goldens=goldens, mode="hybrid_weighted", client=client, collection=collection,
+        embedder=embedder, bm25=bm25, limit=5,
+        lexical_weight=0.8, dense_weight=0.2,
+    )
+    summary = result["summary"]
+    assert summary["mode"] == "hybrid_weighted"
+    assert summary["lexical_weight"] == 0.8
+    assert summary["dense_weight"] == 0.2
+    # New M3C metrics surface in the per-query rows + summary.
+    assert "hit_at_5" in result["per_query"][0]
+    assert "capped_recall_at_5" in result["per_query"][0]
+    assert "r_precision" in result["per_query"][0]
+
+
 def test_lexical_mode_requires_bm25(indexed_client):
     client, collection, embedder, _payloads = indexed_client
     with pytest.raises(ValueError, match="requires a BM25 retriever"):
         evaluate_retrieval(
             goldens=[], mode="lexical", client=client, collection=collection,
+            embedder=embedder, bm25=None,
+        )
+
+
+def test_lexical_first_mode_requires_bm25(indexed_client):
+    client, collection, embedder, _payloads = indexed_client
+    with pytest.raises(ValueError, match="requires a BM25 retriever"):
+        evaluate_retrieval(
+            goldens=[], mode="lexical_first", client=client, collection=collection,
             embedder=embedder, bm25=None,
         )
 

@@ -8,6 +8,7 @@ producing those lists; this module turns them into numbers.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -26,6 +27,35 @@ def recall_at_k(ranked: Sequence[int], gold: Iterable[int], k: int) -> float:
     return round(hit / len(gold_set), 6)
 
 
+def hit_at_k(ranked: Sequence[int], gold: Iterable[int], k: int) -> float:
+    """1.0 if **any** gold doc appears in the top-``k``, else 0.0.
+
+    A "did the user see at least one good answer" signal — the most
+    UX-relevant metric for a RAG answerer that quotes a few reviews.
+    """
+    gold_set = {int(g) for g in gold}
+    if not gold_set or k <= 0:
+        return 0.0
+    return 1.0 if any(int(rid) in gold_set for rid in ranked[:k]) else 0.0
+
+
+def capped_recall_at_k(ranked: Sequence[int], gold: Iterable[int], k: int) -> float:
+    """Recall@k with the denominator capped at ``min(num_gold, k)``.
+
+    Plain Recall@5 is misleadingly low when a query has more than 5
+    gold docs — the top-5 physically cannot contain them all. Capping
+    the denominator measures "of the slots available, how many landed"
+    so high-gold queries are not unfairly penalised.
+    """
+    gold_set = {int(g) for g in gold}
+    if not gold_set or k <= 0:
+        return 0.0
+    head = list(ranked[:k])
+    hit = sum(1 for rid in head if int(rid) in gold_set)
+    denom = min(len(gold_set), k)
+    return round(hit / denom, 6) if denom else 0.0
+
+
 def reciprocal_rank(ranked: Sequence[int], gold: Iterable[int], k: int) -> float:
     """``1 / rank`` of the first gold hit within the top-``k``; 0.0 if none."""
     gold_set = {int(g) for g in gold}
@@ -35,6 +65,21 @@ def reciprocal_rank(ranked: Sequence[int], gold: Iterable[int], k: int) -> float
         if int(rid) in gold_set:
             return round(1.0 / rank, 6)
     return 0.0
+
+
+def r_precision(ranked: Sequence[int], gold: Iterable[int]) -> float:
+    """Precision at rank ``R``, where ``R`` is the number of gold docs.
+
+    A single rank-aware number that needs no ``k``: it asks "if we cut
+    the ranking at exactly as many results as there are gold docs, what
+    fraction are correct?". 0.0 when gold is empty.
+    """
+    gold_set = {int(g) for g in gold}
+    r = len(gold_set)
+    if r == 0:
+        return 0.0
+    hit = sum(1 for rid in ranked[:r] if int(rid) in gold_set)
+    return round(hit / r, 6)
 
 
 def mean_reciprocal_rank_at_k(
@@ -122,13 +167,19 @@ def reciprocal_rank_fusion(
     *,
     k_constant: int = 60,
     top_k: int | None = None,
+    weights: Sequence[float] | None = None,
 ) -> list[int]:
     """Combine multiple ranked lists into one via Reciprocal Rank Fusion.
 
-    Score for doc ``d`` is ``sum(1 / (k_constant + rank_i(d)))`` over
+    Score for doc ``d`` is ``sum(w_i / (k_constant + rank_i(d)))`` over
     rankers that placed ``d``. The default ``k_constant=60`` follows the
     Cormack/Clarke/Buettcher RRF paper. Returns the fused doc list in
     descending fused-score order, optionally trimmed to ``top_k``.
+
+    ``weights`` (one per input ranking) lets a stronger retriever pull
+    harder on the fused order — e.g. ``weights=[0.25, 0.75]`` to favour
+    a lexical ranker over a weaker dense one. When ``None`` every ranker
+    contributes equally (classic RRF).
 
     Ties are broken by the lowest minimum rank across input rankings so
     a doc that ranked #1 anywhere beats a doc with two #4 placements at
@@ -138,12 +189,15 @@ def reciprocal_rank_fusion(
         return []
     if k_constant <= 0:
         raise ValueError("k_constant must be positive")
+    if weights is not None and len(weights) != len(rankings):
+        raise ValueError("weights must have one entry per ranking")
     scores: dict[int, float] = {}
     best_rank: dict[int, int] = {}
-    for ranking in rankings:
+    for idx, ranking in enumerate(rankings):
+        weight = 1.0 if weights is None else float(weights[idx])
         for rank, rid in enumerate(ranking, start=1):
             rid_int = int(rid)
-            scores[rid_int] = scores.get(rid_int, 0.0) + 1.0 / (k_constant + rank)
+            scores[rid_int] = scores.get(rid_int, 0.0) + weight / (k_constant + rank)
             if rid_int not in best_rank or rank < best_rank[rid_int]:
                 best_rank[rid_int] = rank
     ordered = sorted(
@@ -156,48 +210,78 @@ def reciprocal_rank_fusion(
     return fused
 
 
+def priority_fill_fusion(
+    primary: Sequence[int],
+    secondary: Sequence[int],
+    *,
+    top_k: int | None = None,
+) -> list[int]:
+    """Keep ``primary``'s order verbatim, then append ``secondary``-only docs.
+
+    This is the ``lexical_first`` fusion: trust the stronger retriever's
+    ranking entirely and use the weaker one only to backfill slots the
+    primary ranker left empty. De-duplicates by doc id.
+    """
+    seen: set[int] = set()
+    fused: list[int] = []
+    for rid in list(primary) + list(secondary):
+        rid_int = int(rid)
+        if rid_int in seen:
+            continue
+        seen.add(rid_int)
+        fused.append(rid_int)
+    if top_k is not None and top_k > 0:
+        fused = fused[:top_k]
+    return fused
+
+
+# Metric keys the aggregator averages automatically. ``filter_precision``
+# is deliberately excluded — it is averaged separately so the summary can
+# also report how many queries actually carried a filter expectation.
+_METRIC_KEY_RE = re.compile(
+    r"^(?:hit_at_\d+|recall_at_\d+|capped_recall_at_\d+|ndcg_at_\d+"
+    r"|mrr_at_\d+|r_precision)$"
+)
+
+
+def _numeric(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def aggregate_metrics(
     per_query: Sequence[Mapping[str, float | None]],
     *,
-    ks: Sequence[int] = (5, 10, 20),
+    ks: Sequence[int] = (5, 10, 20),  # kept for backward-compatible callers
     mrr_k: int = 10,
 ) -> dict[str, float | int]:
     """Average per-query metric dicts into a single summary dict.
 
-    Each row may have ``recall_at_{k}``, ``ndcg_at_{k}`` (any k in
-    ``ks``), ``mrr_at_{mrr_k}``, ``filter_precision_at_{mrr_k}``. None
-    values are excluded from their respective average. The returned
-    ``n_queries`` is the row count; ``n_queries_with_filter_expectation``
-    counts only queries that contributed to ``filter_precision``.
+    Any key naming a known metric family — ``hit_at_{k}``,
+    ``recall_at_{k}``, ``capped_recall_at_{k}``, ``ndcg_at_{k}``,
+    ``mrr_at_{k}`` or ``r_precision`` — is averaged over the rows that
+    carry a non-None numeric value for it, so adding a metric to the
+    per-query rows is enough to surface it here. None values are
+    excluded from their average. ``filter_precision_at_{mrr_k}`` is
+    handled separately: ``n_queries_with_filter_expectation`` counts the
+    queries that contributed to it.
     """
     summary: dict[str, float | int] = {"n_queries": len(per_query)}
     if not per_query:
         return summary
-    for k in ks:
-        for prefix in ("recall_at_", "ndcg_at_"):
-            key = f"{prefix}{k}"
-            vals = [
-                float(row[key])
-                for row in per_query
-                if row.get(key) is not None and isinstance(row.get(key), (int, float))
-            ]
-            if vals:
-                summary[key] = round(sum(vals) / len(vals), 6)
-    mrr_key = f"mrr_at_{mrr_k}"
-    mrr_vals = [
-        float(row[mrr_key])
-        for row in per_query
-        if row.get(mrr_key) is not None and isinstance(row.get(mrr_key), (int, float))
-    ]
-    if mrr_vals:
-        summary[mrr_key] = round(sum(mrr_vals) / len(mrr_vals), 6)
+
+    keys: set[str] = set()
+    for row in per_query:
+        keys.update(row.keys())
+
+    for key in sorted(keys):
+        if not _METRIC_KEY_RE.match(key):
+            continue
+        vals = [float(row[key]) for row in per_query if _numeric(row.get(key))]
+        if vals:
+            summary[key] = round(sum(vals) / len(vals), 6)
 
     fp_key = f"filter_precision_at_{mrr_k}"
-    fp_vals = [
-        float(row[fp_key])
-        for row in per_query
-        if row.get(fp_key) is not None and isinstance(row.get(fp_key), (int, float))
-    ]
+    fp_vals = [float(row[fp_key]) for row in per_query if _numeric(row.get(fp_key))]
     summary["n_queries_with_filter_expectation"] = len(fp_vals)
     if fp_vals:
         summary[fp_key] = round(sum(fp_vals) / len(fp_vals), 6)

@@ -55,6 +55,13 @@ extend-exclude = ["voicelens/data"]
 select = ["E", "F", "W", "I", "B", "UP"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+# These runnable scripts bootstrap sys.path (so the `scripts` package is
+# importable when the file is executed directly) before importing sibling
+# script modules, which necessitates imports below a statement.
+"scripts/export_retrieval_review_candidates.py" = ["E402"]
+"scripts/tune_retrieval_hybrid.py" = ["E402"]
+
 [tool.pytest.ini_options]
 testpaths = ["voicelens/tests"]
 pythonpath = ["."]

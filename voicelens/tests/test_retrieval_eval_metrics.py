@@ -10,10 +10,14 @@ from voicelens.eval.retrieval_eval import (
     ERROR_WRONG_ASPECT,
     ERROR_WRONG_SENTIMENT,
     aggregate_metrics,
+    capped_recall_at_k,
     classify_retrieval_error,
     dcg_at_k,
     filter_precision_at_k,
+    hit_at_k,
     ndcg_at_k,
+    priority_fill_fusion,
+    r_precision,
     recall_at_k,
     reciprocal_rank,
     reciprocal_rank_fusion,
@@ -267,3 +271,110 @@ def test_aggregate_metrics_averages_only_non_none_values():
 
 def test_aggregate_metrics_handles_empty():
     assert aggregate_metrics([])["n_queries"] == 0
+
+
+def test_aggregate_metrics_averages_new_metric_families():
+    """Hit@k / capped_recall / r_precision are picked up automatically."""
+    per_query = [
+        {"hit_at_5": 1.0, "capped_recall_at_5": 1.0, "r_precision": 1.0},
+        {"hit_at_5": 0.0, "capped_recall_at_5": 0.5, "r_precision": 0.0},
+    ]
+    summary = aggregate_metrics(per_query)
+    assert summary["hit_at_5"] == pytest.approx(0.5)
+    assert summary["capped_recall_at_5"] == pytest.approx(0.75)
+    assert summary["r_precision"] == pytest.approx(0.5)
+
+
+# ---- Hit@k --------------------------------------------------------------
+
+
+def test_hit_at_k_is_one_when_any_gold_in_head():
+    assert hit_at_k([1, 2, 3, 7], [7, 99], 5) == 1.0
+
+
+def test_hit_at_k_is_zero_when_gold_below_k():
+    assert hit_at_k([1, 2, 3, 7], [7], 3) == 0.0
+
+
+def test_hit_at_k_zero_for_empty_gold():
+    assert hit_at_k([1, 2, 3], [], 5) == 0.0
+
+
+# ---- capped recall ------------------------------------------------------
+
+
+def test_capped_recall_caps_denominator_for_high_gold():
+    # 8 gold docs, 3 land in top-5: plain recall = 3/8, capped = 3/5.
+    ranked = [1, 2, 3, 98, 99]
+    gold = [1, 2, 3, 4, 5, 6, 7, 8]
+    assert recall_at_k(ranked, gold, 5) == pytest.approx(3 / 8)
+    assert capped_recall_at_k(ranked, gold, 5) == pytest.approx(3 / 5)
+
+
+def test_capped_recall_matches_recall_when_gold_below_k():
+    # 2 gold, both retrieved -> 2/min(2,5) = 1.0.
+    assert capped_recall_at_k([1, 2, 9], [1, 2], 5) == pytest.approx(1.0)
+
+
+def test_capped_recall_zero_for_empty_gold():
+    assert capped_recall_at_k([1, 2], [], 5) == 0.0
+
+
+# ---- R-precision --------------------------------------------------------
+
+
+def test_r_precision_uses_gold_count_as_cutoff():
+    # R=3: top-3 is [1, 2, 99] -> 2 of 3 correct.
+    assert r_precision([1, 2, 99, 3], [1, 2, 3]) == pytest.approx(2 / 3)
+
+
+def test_r_precision_perfect_is_one():
+    assert r_precision([5, 6, 7, 8], [5, 6, 7]) == 1.0
+
+
+def test_r_precision_zero_for_empty_gold():
+    assert r_precision([1, 2, 3], []) == 0.0
+
+
+# ---- weighted RRF -------------------------------------------------------
+
+
+def test_weighted_rrf_favours_heavily_weighted_ranker():
+    dense = [1, 2]      # ranker 0
+    lexical = [3, 4]    # ranker 1
+    # lexical gets 9x the weight -> its rank-1 doc (3) must beat dense's (1).
+    fused = reciprocal_rank_fusion(
+        [dense, lexical], weights=[0.1, 0.9], top_k=4
+    )
+    assert fused[0] == 3
+    assert fused.index(3) < fused.index(1)
+
+
+def test_weighted_rrf_rejects_weight_length_mismatch():
+    with pytest.raises(ValueError):
+        reciprocal_rank_fusion([[1, 2], [3, 4]], weights=[1.0])
+
+
+def test_equal_weights_match_unweighted_rrf():
+    rankings = [[10, 20, 30], [20, 10, 40]]
+    assert reciprocal_rank_fusion(rankings, weights=[1.0, 1.0]) == (
+        reciprocal_rank_fusion(rankings)
+    )
+
+
+# ---- priority-fill fusion (lexical_first) -------------------------------
+
+
+def test_priority_fill_keeps_primary_order_verbatim():
+    fused = priority_fill_fusion([3, 1, 2], [9, 8])
+    assert fused == [3, 1, 2, 9, 8]
+
+
+def test_priority_fill_dedupes_secondary_overlap():
+    fused = priority_fill_fusion([5, 6], [6, 7, 8])
+    assert fused == [5, 6, 7, 8]
+
+
+def test_priority_fill_trims_to_top_k():
+    fused = priority_fill_fusion([1, 2, 3], [4, 5], top_k=2)
+    assert fused == [1, 2]

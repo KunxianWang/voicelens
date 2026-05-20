@@ -17,10 +17,19 @@ from typing import Any
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
 
-from voicelens.eval.retrieval_eval import reciprocal_rank_fusion
+from voicelens.eval.retrieval_eval import (
+    priority_fill_fusion,
+    reciprocal_rank_fusion,
+)
 from voicelens.retrieval.embeddings import EmbeddingProvider
 from voicelens.retrieval.lexical import BM25LexicalRetriever, filter_payloads
 from voicelens.retrieval.search import SearchHit, retrieve
+
+# Supported fusion strategies for :func:`hybrid_search`.
+#   rrf_equal     - classic Reciprocal Rank Fusion, both rankers equal.
+#   rrf_weighted  - RRF with per-ranker weights (favour the stronger one).
+#   lexical_first - trust the lexical ranking, backfill with dense-only docs.
+HYBRID_FUSIONS = ("rrf_equal", "rrf_weighted", "lexical_first")
 
 
 def _hit_from_payload(score: float, payload: dict[str, Any]) -> SearchHit:
@@ -90,15 +99,25 @@ def hybrid_search(
     lexical_rating_max: int | None = None,
     oversample_k: int = 50,
     rrf_constant: int = 60,
+    fusion: str = "rrf_equal",
+    lexical_weight: float = 0.5,
+    dense_weight: float = 0.5,
 ) -> list[SearchHit]:
-    """Run dense + lexical, fuse with RRF, return ``limit`` SearchHits.
+    """Run dense + lexical, fuse the rankings, return ``limit`` SearchHits.
 
     Both retrievers see the same ``query`` and the same filter
     predicates. The dense side accepts a pre-built ``rest.Filter`` so
     callers can pass whatever :func:`voicelens.retrieval.filters.build_search_filter`
     produced; the lexical side accepts the same predicates as keyword
     args because BM25 doesn't speak Qdrant filters natively.
+
+    ``fusion`` selects how the two rankings combine (see
+    :data:`HYBRID_FUSIONS`). M3B measured pure RRF underperforming the
+    lexical baseline because the weaker dense ranking diluted it;
+    ``rrf_weighted`` and ``lexical_first`` exist to correct that.
     """
+    if fusion not in HYBRID_FUSIONS:
+        raise ValueError(f"fusion must be one of {HYBRID_FUSIONS}, got {fusion!r}")
     dense_hits = retrieve(
         client=client,
         collection=collection,
@@ -121,11 +140,21 @@ def hybrid_search(
     dense_ranking = [h.review_id for h in dense_hits if h.review_id is not None]
     lexical_ranking = [h.review_id for h in lexical_hits if h.review_id is not None]
 
-    fused_ids = reciprocal_rank_fusion(
-        [dense_ranking, lexical_ranking],
-        k_constant=rrf_constant,
-        top_k=limit,
-    )
+    if fusion == "lexical_first":
+        fused_ids = priority_fill_fusion(
+            lexical_ranking, dense_ranking, top_k=limit
+        )
+    else:
+        # dense ranking is index 0, lexical is index 1 — keep weights aligned.
+        weights = (
+            [dense_weight, lexical_weight] if fusion == "rrf_weighted" else None
+        )
+        fused_ids = reciprocal_rank_fusion(
+            [dense_ranking, lexical_ranking],
+            k_constant=rrf_constant,
+            top_k=limit,
+            weights=weights,
+        )
     payloads: dict[int, dict[str, Any]] = {}
     for hit in dense_hits:
         if hit.review_id is not None and hit.review_id not in payloads:

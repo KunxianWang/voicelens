@@ -8,6 +8,9 @@
         embed-mock-smoke embed-v2-1k retrieval-smoke qdrant-stats \
         build-retrieval-goldens evaluate-retrieval-dense evaluate-retrieval-lexical \
         evaluate-retrieval-hybrid retrieval-errors \
+        analyze-retrieval-goldens export-retrieval-candidates \
+        evaluate-retrieval-hybrid-weighted evaluate-retrieval-lexical-first \
+        tune-retrieval-hybrid embed-v2-1k-base evaluate-retrieval-dense-base \
         test lint install
 
 PYTHON ?= python
@@ -18,6 +21,12 @@ ABSA_ASPECT_VERSION ?= v2
 QDRANT_COLLECTION ?= reviews_v2
 EMBEDDING_PROVIDER ?= local
 EMBEDDING_MODEL ?= BAAI/bge-small-en-v1.5
+# M3C optional embedding-model comparison (bge-base, 768-dim).
+QDRANT_COLLECTION_BASE ?= reviews_v2_bge_base
+EMBEDDING_MODEL_BASE ?= BAAI/bge-base-en-v1.5
+# M3C weighted-hybrid defaults (lexical beat dense in M3B, so favour it).
+LEXICAL_WEIGHT ?= 0.75
+DENSE_WEIGHT ?= 0.25
 
 help:
 	@echo "Targets:"
@@ -56,6 +65,13 @@ help:
 	@echo "  evaluate-retrieval-lexical run retrieval eval (BM25 lexical baseline)"
 	@echo "  evaluate-retrieval-hybrid  run retrieval eval (RRF dense+lexical hybrid)"
 	@echo "  retrieval-errors         alias: dense eval and print errors CSV path"
+	@echo "  analyze-retrieval-goldens   audit golden quality -> diagnostics CSV"
+	@echo "  export-retrieval-candidates dump per-query candidates for manual review"
+	@echo "  evaluate-retrieval-hybrid-weighted  weighted-RRF hybrid eval"
+	@echo "  evaluate-retrieval-lexical-first    lexical-primary hybrid eval"
+	@echo "  tune-retrieval-hybrid       grid-tune fusion weights -> tuning CSV"
+	@echo "  embed-v2-1k-base            (M3C optional) reindex 1k reviews with bge-base"
+	@echo "  evaluate-retrieval-dense-base  (M3C optional) dense eval on bge-base index"
 	@echo "  db-stats                 print review / brand / rating / DQ counts"
 	@echo "  test                     run pytest (uses SQLite in-memory)"
 	@echo "  lint                     ruff check"
@@ -233,6 +249,55 @@ evaluate-retrieval-hybrid:
 
 retrieval-errors: evaluate-retrieval-dense
 	@echo "Inspect data/eval/retrieval_errors.csv (sort by error_type)"
+
+evaluate-retrieval-hybrid-weighted:
+	$(PYTHON) scripts/evaluate_retrieval.py --mode hybrid_weighted \
+	  --collection "$(QDRANT_COLLECTION)" \
+	  --embedding-provider "$(EMBEDDING_PROVIDER)" \
+	  --embedding-model "$(EMBEDDING_MODEL)" \
+	  --lexical-weight "$(LEXICAL_WEIGHT)" \
+	  --dense-weight "$(DENSE_WEIGHT)"
+
+evaluate-retrieval-lexical-first:
+	$(PYTHON) scripts/evaluate_retrieval.py --mode lexical_first \
+	  --collection "$(QDRANT_COLLECTION)" \
+	  --embedding-provider "$(EMBEDDING_PROVIDER)" \
+	  --embedding-model "$(EMBEDDING_MODEL)"
+
+analyze-retrieval-goldens:
+	$(PYTHON) scripts/analyze_retrieval_goldens.py \
+	  --collection "$(QDRANT_COLLECTION)"
+
+export-retrieval-candidates:
+	$(PYTHON) scripts/export_retrieval_review_candidates.py \
+	  --collection "$(QDRANT_COLLECTION)" \
+	  --embedding-provider "$(EMBEDDING_PROVIDER)" \
+	  --embedding-model "$(EMBEDDING_MODEL)"
+
+tune-retrieval-hybrid:
+	$(PYTHON) scripts/tune_retrieval_hybrid.py \
+	  --collection "$(QDRANT_COLLECTION)" \
+	  --embedding-provider "$(EMBEDDING_PROVIDER)" \
+	  --embedding-model "$(EMBEDDING_MODEL)"
+
+# --- M3C optional: embedding-model comparison (bge-base, 768-dim) ----------
+# Heavier than bge-small: downloads ~440MB and embeds 1k reviews into a
+# separate collection, leaving reviews_v2 untouched.
+embed-v2-1k-base:
+	$(PYTHON) -m voicelens.pipeline.flows.embed_flow \
+	  --aspect-version "$(ABSA_ASPECT_VERSION)" \
+	  --provider "$(ABSA_LLM_PROVIDER)" \
+	  --model "$(ABSA_MODEL)" \
+	  --embedding-provider "$(EMBEDDING_PROVIDER)" \
+	  --embedding-model "$(EMBEDDING_MODEL_BASE)" \
+	  --collection "$(QDRANT_COLLECTION_BASE)" \
+	  --limit 1000
+
+evaluate-retrieval-dense-base:
+	$(PYTHON) scripts/evaluate_retrieval.py --mode dense \
+	  --collection "$(QDRANT_COLLECTION_BASE)" \
+	  --embedding-provider "$(EMBEDDING_PROVIDER)" \
+	  --embedding-model "$(EMBEDDING_MODEL_BASE)"
 
 evaluate-absa:
 	$(PYTHON) scripts/evaluate_absa.py

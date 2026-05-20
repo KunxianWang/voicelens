@@ -35,9 +35,12 @@ from voicelens.config import (
 )
 from voicelens.eval.retrieval_eval import (
     aggregate_metrics,
+    capped_recall_at_k,
     classify_retrieval_error,
     filter_precision_at_k,
+    hit_at_k,
     ndcg_at_k,
+    r_precision,
     recall_at_k,
     reciprocal_rank,
 )
@@ -48,13 +51,35 @@ from voicelens.retrieval.lexical import BM25LexicalRetriever
 from voicelens.retrieval.search import SearchHit, retrieve
 
 DEFAULT_GOLDENS = Path("data/eval/retrieval_goldens.jsonl")
+REFINED_GOLDENS = Path("data/eval/retrieval_goldens_refined.jsonl")
 DEFAULT_RESULTS = Path("data/eval/retrieval_eval_results.csv")
 DEFAULT_SUMMARY = Path("data/eval/retrieval_eval_summary.json")
 DEFAULT_ERRORS = Path("data/eval/retrieval_errors.csv")
 DEFAULT_KS = (5, 10, 20)
+DEFAULT_HIT_KS = (1, 5, 10, 20)
 DEFAULT_MRR_K = 10
 
-VALID_MODES = ("dense", "lexical", "hybrid")
+VALID_MODES = ("dense", "lexical", "hybrid", "hybrid_weighted", "lexical_first")
+# Hybrid-family modes and the fusion strategy each one drives.
+_HYBRID_FUSION_BY_MODE = {
+    "hybrid": "rrf_equal",
+    "hybrid_weighted": "rrf_weighted",
+    "lexical_first": "lexical_first",
+}
+
+
+def resolve_goldens_path(arg: str | None) -> Path:
+    """Pick the goldens file: explicit arg > refined file > base file.
+
+    Supports the M3C manual-refinement workflow — once a human edits
+    ``retrieval_goldens_refined.jsonl`` it is picked up automatically,
+    but the weakly-supervised base set is the fallback.
+    """
+    if arg:
+        return Path(arg)
+    if REFINED_GOLDENS.exists():
+        return REFINED_GOLDENS
+    return DEFAULT_GOLDENS
 
 
 @dataclass
@@ -136,6 +161,9 @@ def _hybrid(
     limit: int,
     filter_payload: dict[str, Any] | None,
     oversample_k: int,
+    fusion: str,
+    lexical_weight: float,
+    dense_weight: float,
 ) -> list[SearchHit]:
     f = filter_payload or {}
     dense_filter = build_search_filter(**f) if f else None
@@ -153,6 +181,9 @@ def _hybrid(
         lexical_rating_min=f.get("rating_min"),
         lexical_rating_max=f.get("rating_max"),
         oversample_k=oversample_k,
+        fusion=fusion,
+        lexical_weight=lexical_weight,
+        dense_weight=dense_weight,
     )
 
 
@@ -177,6 +208,8 @@ def _run_query(
     bm25: BM25LexicalRetriever | None,
     limit: int,
     oversample_k: int,
+    lexical_weight: float,
+    dense_weight: float,
 ) -> _QueryRun:
     query = str(golden.get("query") or "")
     filter_payload = _golden_filter_payload(golden)
@@ -190,12 +223,14 @@ def _run_query(
         if mode == "lexical":
             assert bm25 is not None
             return _lexical(bm25=bm25, query=query, limit=limit, filter_payload=fp)
-        if mode == "hybrid":
+        if mode in _HYBRID_FUSION_BY_MODE:
             assert bm25 is not None
             return _hybrid(
                 client=client, collection=collection, embedder=embedder,
                 bm25=bm25, query=query, limit=limit, filter_payload=fp,
                 oversample_k=oversample_k,
+                fusion=_HYBRID_FUSION_BY_MODE[mode],
+                lexical_weight=lexical_weight, dense_weight=dense_weight,
             )
         raise ValueError(f"unknown retrieval mode {mode!r}")
 
@@ -213,11 +248,13 @@ def _per_query_metrics(
     runs: Iterable[_QueryRun],
     *,
     ks: tuple[int, ...],
+    hit_ks: tuple[int, ...],
     mrr_k: int,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for run in runs:
         gold = run.golden.get("gold_review_ids") or []
+        ranked = run.ranked_filtered
         row: dict[str, Any] = {
             "query_id": run.golden.get("query_id"),
             "query": run.golden.get("query"),
@@ -225,18 +262,26 @@ def _per_query_metrics(
             "expected_sentiment": run.golden.get("expected_sentiment"),
             "expected_brand": run.golden.get("expected_brand"),
             "gold_count": len(gold),
-            "retrieved_count": len(run.ranked_filtered),
+            "retrieved_count": len(ranked),
         }
         if not gold:
+            for hk in hit_ks:
+                row[f"hit_at_{hk}"] = None
             for k in ks:
                 row[f"recall_at_{k}"] = None
                 row[f"ndcg_at_{k}"] = None
+            row["capped_recall_at_5"] = None
+            row["r_precision"] = None
             row[f"mrr_at_{mrr_k}"] = None
         else:
+            for hk in hit_ks:
+                row[f"hit_at_{hk}"] = hit_at_k(ranked, gold, hk)
             for k in ks:
-                row[f"recall_at_{k}"] = recall_at_k(run.ranked_filtered, gold, k)
-                row[f"ndcg_at_{k}"] = ndcg_at_k(run.ranked_filtered, gold, k)
-            row[f"mrr_at_{mrr_k}"] = reciprocal_rank(run.ranked_filtered, gold, mrr_k)
+                row[f"recall_at_{k}"] = recall_at_k(ranked, gold, k)
+                row[f"ndcg_at_{k}"] = ndcg_at_k(ranked, gold, k)
+            row["capped_recall_at_5"] = capped_recall_at_k(ranked, gold, 5)
+            row["r_precision"] = r_precision(ranked, gold)
+            row[f"mrr_at_{mrr_k}"] = reciprocal_rank(ranked, gold, mrr_k)
         row[f"filter_precision_at_{mrr_k}"] = filter_precision_at_k(
             run.top_hits,
             expected_aspect=run.golden.get("expected_aspect"),
@@ -307,11 +352,14 @@ def evaluate_retrieval(
     limit: int = 20,
     oversample_k: int = 50,
     ks: tuple[int, ...] = DEFAULT_KS,
+    hit_ks: tuple[int, ...] = DEFAULT_HIT_KS,
     mrr_k: int = DEFAULT_MRR_K,
+    lexical_weight: float = 0.75,
+    dense_weight: float = 0.25,
 ) -> dict[str, Any]:
     if mode not in VALID_MODES:
         raise ValueError(f"mode must be one of {VALID_MODES}, got {mode!r}")
-    if mode in ("lexical", "hybrid") and bm25 is None:
+    if mode != "dense" and bm25 is None:
         raise ValueError(f"mode={mode!r} requires a BM25 retriever")
 
     runs = [
@@ -324,16 +372,21 @@ def evaluate_retrieval(
             bm25=bm25,
             limit=limit,
             oversample_k=oversample_k,
+            lexical_weight=lexical_weight,
+            dense_weight=dense_weight,
         )
         for g in goldens
     ]
-    per_query = _per_query_metrics(runs, ks=ks, mrr_k=mrr_k)
+    per_query = _per_query_metrics(runs, ks=ks, hit_ks=hit_ks, mrr_k=mrr_k)
     summary = aggregate_metrics(per_query, ks=ks, mrr_k=mrr_k)
     errors = _error_rows(runs, mode=mode)
     error_breakdown = Counter(row["error_type"] for row in errors)
     summary["mode"] = mode
     summary["collection"] = collection
     summary["limit"] = limit
+    if mode == "hybrid_weighted":
+        summary["lexical_weight"] = lexical_weight
+        summary["dense_weight"] = dense_weight
     summary["error_breakdown"] = dict(error_breakdown.most_common())
     summary["queries_with_gold"] = sum(1 for g in goldens if g.get("gold_review_ids"))
     summary["queries_without_gold"] = sum(
@@ -352,7 +405,11 @@ def evaluate_retrieval(
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate retrieval quality over the golden set.")
     parser.add_argument("--mode", choices=VALID_MODES, default="dense")
-    parser.add_argument("--goldens", default=str(DEFAULT_GOLDENS))
+    parser.add_argument(
+        "--goldens",
+        default=None,
+        help="Goldens JSONL. Default: refined file if present, else base set.",
+    )
     parser.add_argument("--results", default=str(DEFAULT_RESULTS))
     parser.add_argument("--summary", default=str(DEFAULT_SUMMARY))
     parser.add_argument("--errors", default=str(DEFAULT_ERRORS))
@@ -362,12 +419,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--embedding-model", default=None, help=f"Default: {EMBEDDING_MODEL}")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--oversample-k", type=int, default=50, help="Pre-fusion K for hybrid mode")
+    parser.add_argument(
+        "--lexical-weight", type=float, default=0.75,
+        help="Lexical ranker weight for mode=hybrid_weighted (default 0.75).",
+    )
+    parser.add_argument(
+        "--dense-weight", type=float, default=0.25,
+        help="Dense ranker weight for mode=hybrid_weighted (default 0.25).",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    goldens_path = Path(args.goldens)
+    goldens_path = resolve_goldens_path(args.goldens)
     if not goldens_path.exists():
         print(
             f"ERROR: goldens file {goldens_path} is missing. "
@@ -393,7 +458,7 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     bm25 = None
-    if args.mode in ("lexical", "hybrid"):
+    if args.mode != "dense":
         bm25 = BM25LexicalRetriever.from_qdrant(client, collection)
 
     result = evaluate_retrieval(
@@ -405,10 +470,18 @@ def main(argv: list[str] | None = None) -> int:
         bm25=bm25,
         limit=args.limit,
         oversample_k=args.oversample_k,
+        lexical_weight=args.lexical_weight,
+        dense_weight=args.dense_weight,
     )
 
     _write_csv(result["per_query"], Path(args.results))
     _write_csv(result["errors"], Path(args.errors))
+    # A mode-suffixed copy of the errors so analyze_retrieval_goldens.py can
+    # cross-reference no_gold_hit across every mode without them clobbering
+    # each other's canonical retrieval_errors.csv.
+    errors_path = Path(args.errors)
+    mode_errors = errors_path.with_name(f"retrieval_errors_{args.mode}.csv")
+    _write_csv(result["errors"], mode_errors)
     Path(args.summary).parent.mkdir(parents=True, exist_ok=True)
     with open(args.summary, "w", encoding="utf-8") as f:
         json.dump(result["summary"], f, indent=2, sort_keys=True, ensure_ascii=False)
@@ -416,9 +489,11 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = result["summary"]
     print(json.dumps(summary, indent=2, sort_keys=True, ensure_ascii=False))
-    print(f"\nWrote per-query results: {args.results}")
+    print(f"\nGoldens used            : {goldens_path}")
+    print(f"Wrote per-query results : {args.results}")
     print(f"Wrote summary           : {args.summary}")
     print(f"Wrote errors            : {args.errors}")
+    print(f"Wrote errors (per-mode) : {mode_errors}")
     return 0
 
 

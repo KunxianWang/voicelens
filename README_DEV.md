@@ -1372,6 +1372,114 @@ iteration target.
 
 ---
 
+## Milestone 3C: Retrieval tuning
+
+M3B was the harness; M3C is one focused tuning pass before RAG. The
+M3B run failed every Recall gate (dense Recall@5 = 0.27, Recall@20 =
+0.46), so we do **not** build the LangGraph/RAG layer yet — we first
+work out *why* and how far tuning closes the gap.
+
+### Why M3B did not pass the retrieval gates
+
+Two things, separable:
+
+1. **The retriever.** Dense (bge-small) lost to BM25 on every metric.
+2. **The goldens.** They are weakly supervised — gold ids come from
+   `evidence_quote` phrase matching, ~4.86 per query — so a low score
+   partly reflects a noisy gold set, not only a weak retriever.
+
+M3C measures both: `analyze-retrieval-goldens` audits the gold set, and
+`tune-retrieval-hybrid` sweeps fusion configs.
+
+### Why BM25 beating dense is expected here
+
+E-commerce failure queries are short and keyword-heavy — "dead on
+arrival", "won't charge", "USB-C port". Exact-token overlap with the
+review text is high, which is exactly BM25's strength. A 384-dim
+general-purpose sentence embedding adds paraphrase robustness the
+dashboard does not really need for these phrasings, and on a small
+1k-doc corpus the dense signal is noisier. So `lexical` and
+`lexical_first` are strong, defensible production choices, not a hack.
+
+### Analyse noisy goldens
+
+```bash
+make analyze-retrieval-goldens
+# writes data/eval/retrieval_golden_diagnostics.csv
+```
+
+Per golden it reports `num_gold`, how many gold ids are actually
+indexed in Qdrant, `max_possible_recall_at_{5,10}` (the ceiling any
+retriever could reach), and a `needs_manual_review` flag. A golden is
+flagged when it has no gold, more than 10 gold, a max Recall@5 below
+0.75, gold ids missing from the index, or was a `no_gold_hit` in every
+evaluated mode (read from the per-mode `retrieval_errors_<mode>.csv`
+files `evaluate_retrieval.py` writes).
+
+### Export manual-review candidates
+
+```bash
+make export-retrieval-candidates
+# writes data/eval/retrieval_review_candidates.csv
+```
+
+For every query it dumps the top-15 dense / lexical / hybrid hits side
+by side with `currently_gold` and a blank `suggested_action` column.
+Hand-edit `data/eval/retrieval_goldens_refined.jsonl` from it — all
+eval/tuning scripts pick up the refined file automatically when it
+exists, falling back to the weakly-supervised base set otherwise. The
+refinement step is never automated.
+
+### Weighted hybrid tuning
+
+Plain RRF (`rrf_equal`) underperformed because the weak dense ranking
+diluted the strong lexical one. Two extra fusion modes fix this:
+
+- `hybrid_weighted` — weighted RRF, `--lexical-weight` / `--dense-weight`
+  (default 0.75 / 0.25).
+- `lexical_first` — keep the lexical ranking verbatim, backfill empty
+  slots with dense-only hits.
+
+```bash
+make evaluate-retrieval-hybrid-weighted   # weighted RRF
+make evaluate-retrieval-lexical-first     # lexical-primary
+make tune-retrieval-hybrid                # grid sweep -> CSV
+```
+
+`tune-retrieval-hybrid` evaluates dense, lexical, rrf_equal,
+lexical_first and weighted RRF at lexical_weight 0.6/0.7/0.8/0.9,
+writing `data/eval/retrieval_tuning_summary.csv` (one row per config).
+
+### New metrics in M3C
+
+| metric | definition |
+|---|---|
+| Hit@K | 1 if any gold doc is in the top-K, else 0 (UX "did they see a good answer") |
+| capped_recall@5 | Recall@5 with the denominator capped at `min(num_gold, 5)` — fair to high-gold queries |
+| R-precision | precision at rank R, where R = number of gold docs |
+
+### Which metric to prioritise
+
+- **Hit@5 and MRR@10** — the answer-UX metrics. A RAG answerer quotes a
+  few reviews; what matters is at least one good one near the top.
+- **Recall@20** — evidence coverage. Use it when the dashboard needs a
+  broad set of supporting quotes, not just the best one.
+- **filter_precision@10** — self-query / metadata-filter correctness;
+  it stayed 1.0 in M3B and should not regress.
+
+Raw Recall@5 is kept but de-emphasised: with ~4.86 gold/query it is
+structurally capped, which is what `capped_recall@5` corrects for.
+
+### Optional: embedding-model comparison (bge-base)
+
+`embed-v2-1k-base` / `evaluate-retrieval-dense-base` reindex the 1k
+subset with `BAAI/bge-base-en-v1.5` (768-dim) into a separate
+`reviews_v2_bge_base` collection, leaving `reviews_v2` untouched. This
+is heavier (≈440MB download) and **deferred** — run it only if you want
+to test whether a larger embedding closes the dense-vs-lexical gap.
+
+---
+
 ## Not yet implemented (intentionally)
 
 - Real-LLM ABSA over the full 245k MVP subset.
