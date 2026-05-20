@@ -11,6 +11,8 @@
         analyze-retrieval-goldens export-retrieval-candidates \
         evaluate-retrieval-hybrid-weighted evaluate-retrieval-lexical-first \
         tune-retrieval-hybrid embed-v2-1k-base evaluate-retrieval-dense-base \
+        validate-retrieval-goldens-refined evaluate-retrieval-refined-lexical-first \
+        tune-retrieval-hybrid-refined \
         test lint install
 
 PYTHON ?= python
@@ -27,6 +29,8 @@ EMBEDDING_MODEL_BASE ?= BAAI/bge-base-en-v1.5
 # M3C weighted-hybrid defaults (lexical beat dense in M3B, so favour it).
 LEXICAL_WEIGHT ?= 0.75
 DENSE_WEIGHT ?= 0.25
+# Hand-refined golden set (manual pass over retrieval_review_candidates.csv).
+REFINED_GOLDENS ?= data/eval/retrieval_goldens_refined.jsonl
 
 help:
 	@echo "Targets:"
@@ -72,6 +76,9 @@ help:
 	@echo "  tune-retrieval-hybrid       grid-tune fusion weights -> tuning CSV"
 	@echo "  embed-v2-1k-base            (M3C optional) reindex 1k reviews with bge-base"
 	@echo "  evaluate-retrieval-dense-base  (M3C optional) dense eval on bge-base index"
+	@echo "  validate-retrieval-goldens-refined   schema-check the hand-refined goldens"
+	@echo "  evaluate-retrieval-refined-lexical-first  lexical_first eval on refined goldens"
+	@echo "  tune-retrieval-hybrid-refined        grid-tune fusion on refined goldens"
 	@echo "  db-stats                 print review / brand / rating / DQ counts"
 	@echo "  test                     run pytest (uses SQLite in-memory)"
 	@echo "  lint                     ruff check"
@@ -298,6 +305,26 @@ evaluate-retrieval-dense-base:
 	  --collection "$(QDRANT_COLLECTION_BASE)" \
 	  --embedding-provider "$(EMBEDDING_PROVIDER)" \
 	  --embedding-model "$(EMBEDDING_MODEL_BASE)"
+
+# --- M3C refined-goldens workflow ------------------------------------------
+# Eval/tune against the hand-refined gold set explicitly (the --goldens flag
+# overrides the auto-detect so the run is unambiguous).
+validate-retrieval-goldens-refined:
+	$(PYTHON) scripts/validate_retrieval_goldens.py --goldens "$(REFINED_GOLDENS)"
+
+evaluate-retrieval-refined-lexical-first:
+	$(PYTHON) scripts/evaluate_retrieval.py --mode lexical_first \
+	  --goldens "$(REFINED_GOLDENS)" \
+	  --collection "$(QDRANT_COLLECTION)" \
+	  --embedding-provider "$(EMBEDDING_PROVIDER)" \
+	  --embedding-model "$(EMBEDDING_MODEL)"
+
+tune-retrieval-hybrid-refined:
+	$(PYTHON) scripts/tune_retrieval_hybrid.py \
+	  --goldens "$(REFINED_GOLDENS)" \
+	  --collection "$(QDRANT_COLLECTION)" \
+	  --embedding-provider "$(EMBEDDING_PROVIDER)" \
+	  --embedding-model "$(EMBEDDING_MODEL)"
 
 evaluate-absa:
 	$(PYTHON) scripts/evaluate_absa.py
