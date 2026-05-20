@@ -62,3 +62,8 @@ docs/VoiceLens_knowledge_mastery_guide.md
 data/*
 !data/README.md
 !data/.gitkeep
+# data/eval holds generated eval artefacts (ignored) — except the
+# hand-curated refined golden set, which is not regenerable and is tracked.
+!data/eval/
+data/eval/*
+!data/eval/retrieval_goldens_refined.jsonl
