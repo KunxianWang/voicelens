@@ -166,3 +166,66 @@ class ABSAReviewStatus(Base):
     error_codes_json: Mapped[dict | None] = mapped_column(JSON)
     processed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class Cluster(Base):
+    """One topic cluster of negative ABSA mentions (M4A).
+
+    Clusters are produced per ``aspect_code`` by ``cluster_flow``: for
+    each aspect the negative evidence quotes are grouped with TF-IDF +
+    KMeans (or BERTopic when installed). A cluster carries a short
+    human-readable ``label``, the TF-IDF ``topic_keywords`` it was
+    labelled from, and a few ``representative_review_ids`` / quotes for
+    quick inspection.
+
+    ``run_id`` groups every cluster written by a single flow invocation
+    so re-runs can be told apart; ``cluster_flow`` clears prior rows for
+    the same ``(aspect_version, provider, model_name)`` before inserting
+    so stats stay deterministic.
+    """
+
+    __tablename__ = "cluster"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    aspect_version: Mapped[str] = mapped_column(String(16), nullable=False, default="v2")
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    aspect_code: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    label: Mapped[str] = mapped_column(String(255), nullable=False)
+    algorithm: Mapped[str] = mapped_column(String(32), nullable=False, default="tfidf_kmeans")
+    size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    severity_weighted_size: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    topic_keywords: Mapped[list | None] = mapped_column(JSON)
+    representative_review_ids: Mapped[list | None] = mapped_column(JSON)
+    representative_quotes: Mapped[list | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+    members: Mapped[list[ReviewCluster]] = relationship(
+        "ReviewCluster", back_populates="cluster", cascade="all, delete-orphan"
+    )
+
+
+class ReviewCluster(Base):
+    """Membership join: one negative review (under one aspect) in one cluster.
+
+    A review with negative mentions on several aspects is clustered once
+    per aspect, so it can appear in several ``review_cluster`` rows — but
+    never twice in the same cluster (enforced by the unique constraint).
+    """
+
+    __tablename__ = "review_cluster"
+    __table_args__ = (
+        UniqueConstraint("cluster_id", "review_id", name="uq_review_cluster_cluster_review"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    cluster_id: Mapped[int] = mapped_column(
+        ForeignKey("cluster.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    review_id: Mapped[int] = mapped_column(ForeignKey("review.id"), nullable=False, index=True)
+    aspect_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str | None] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+    cluster: Mapped[Cluster] = relationship("Cluster", back_populates="members")

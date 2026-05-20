@@ -13,6 +13,7 @@
         tune-retrieval-hybrid embed-v2-1k-base evaluate-retrieval-dense-base \
         validate-retrieval-goldens-refined evaluate-retrieval-refined-lexical-first \
         tune-retrieval-hybrid-refined \
+        cluster-v2 cluster-stats \
         test lint install
 
 PYTHON ?= python
@@ -31,6 +32,8 @@ LEXICAL_WEIGHT ?= 0.75
 DENSE_WEIGHT ?= 0.25
 # Hand-refined golden set (manual pass over retrieval_review_candidates.csv).
 REFINED_GOLDENS ?= data/eval/retrieval_goldens_refined.jsonl
+# M4A clustering: minimum members for a cluster to be kept.
+CLUSTER_MIN_SIZE ?= 5
 
 help:
 	@echo "Targets:"
@@ -79,6 +82,8 @@ help:
 	@echo "  validate-retrieval-goldens-refined   schema-check the hand-refined goldens"
 	@echo "  evaluate-retrieval-refined-lexical-first  lexical_first eval on refined goldens"
 	@echo "  tune-retrieval-hybrid-refined        grid-tune fusion on refined goldens"
+	@echo "  cluster-v2               cluster negative v2 ABSA mentions into issue topics"
+	@echo "  cluster-stats            summarise the cluster table"
 	@echo "  db-stats                 print review / brand / rating / DQ counts"
 	@echo "  test                     run pytest (uses SQLite in-memory)"
 	@echo "  lint                     ruff check"
@@ -325,6 +330,19 @@ tune-retrieval-hybrid-refined:
 	  --collection "$(QDRANT_COLLECTION)" \
 	  --embedding-provider "$(EMBEDDING_PROVIDER)" \
 	  --embedding-model "$(EMBEDDING_MODEL)"
+
+cluster-v2:
+	$(PYTHON) -m voicelens.pipeline.flows.cluster_flow \
+	  --aspect-version "$(ABSA_ASPECT_VERSION)" \
+	  --provider "$(ABSA_LLM_PROVIDER)" \
+	  --model "$(ABSA_MODEL)" \
+	  --min-cluster-size "$(CLUSTER_MIN_SIZE)"
+
+cluster-stats:
+	$(PYTHON) scripts/cluster_stats.py \
+	  --aspect-version "$(ABSA_ASPECT_VERSION)" \
+	  --provider "$(ABSA_LLM_PROVIDER)" \
+	  --model "$(ABSA_MODEL)"
 
 evaluate-absa:
 	$(PYTHON) scripts/evaluate_absa.py

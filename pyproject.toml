@@ -37,6 +37,13 @@ retrieval = [
     # needed for both indexing and the evaluation harness.
     "rank_bm25>=0.2",
 ]
+analytics = [
+    # M4A topic clustering. scikit-learn powers the TF-IDF + KMeans
+    # baseline; it is lightweight enough to keep in the test path.
+    # BERTopic is intentionally NOT pinned here — it pulls UMAP + HDBSCAN
+    # and is used only when separately installed.
+    "scikit-learn>=1.4",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

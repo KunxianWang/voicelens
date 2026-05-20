@@ -1480,11 +1480,82 @@ to test whether a larger embedding closes the dense-vs-lexical gap.
 
 ---
 
+## Milestone 4A: Issue clustering
+
+Retrieval (M3) answers *"find me reviews about X"*. M4A answers the
+question a brand actually asks first: *"what are customers complaining
+about, and which complaints are clustering together?"* It groups the
+negative ABSA mentions into emergent **issue clusters** — the raw
+material the M4B anomaly detector will later watch for spikes.
+
+### Why clustering comes after ABSA and retrieval eval
+
+Clustering is only as good as its input. ABSA (M2) had to be evaluated
+first so we trust the negative-mention labels; retrieval (M3) had to be
+evaluated so the eventual dashboard can drill from a cluster into its
+supporting reviews. Clustering noisy labels would have produced
+confident-looking but meaningless topics.
+
+### How it works
+
+`cluster_flow` (`voicelens/pipeline/flows/cluster_flow.py`):
+
+1. **Input** — `build_clustering_records` selects every negative aspect
+   mention on a successfully ABSA-processed review, joined to brand /
+   sku / rating.
+2. **Cluster by aspect first** — an MVP simplification: charging and
+   bluetooth complaints never mix. Each aspect's evidence quotes are
+   sub-clustered with TF-IDF + KMeans (`k = min(8, n // min_cluster_size)`).
+   BERTopic is used instead **when it is installed** (`--algorithm`
+   selects `auto` / `tfidf_kmeans` / `bertopic`); it is not a required
+   dependency.
+3. **Label** — each cluster gets a short label stitched from its top
+   TF-IDF keywords (offline, no LLM): e.g. `"stopped working week"`,
+   `"bluetooth keeps disconnecting"`.
+4. **Persist** — clusters land in the `cluster` table, memberships in
+   `review_cluster`. Re-runs are idempotent per `(aspect_version,
+   provider, model_name)`: the prior run's rows are deleted first.
+
+Any aspect (or KMeans sub-cluster) below `--min-cluster-size` is dropped
+— too little signal to be a real issue.
+
+### Run it
+
+```bash
+make cluster-v2      # python -m voicelens.pipeline.flows.cluster_flow ...
+make cluster-stats   # summarise the cluster table
+```
+
+`make cluster-v2` needs the `analytics` extra (`pip install -e .[analytics]`,
+brings in scikit-learn). Tune with `CLUSTER_MIN_SIZE` (default 5).
+
+### Inspect the output
+
+`cluster-stats` prints total clusters, clusters per aspect, and the top
+clusters by **size** and by **severity-weighted size** — the latter
+weights `high`/`medium`/`low` severity 3/2/1, so a handful of severe
+complaints can out-rank a pile of minor ones. Each `cluster` row also
+stores `topic_keywords`, `representative_review_ids` and
+`representative_quotes` for drill-down.
+
+### What the outputs mean
+
+- `cluster.size` — how many negative mentions fell in the cluster.
+- `cluster.severity_weighted_size` — size weighted by ABSA severity;
+  the better "which issue hurts most" ranking.
+- `review_cluster` — the membership join; one review appears once per
+  aspect it was clustered under.
+
+M4B (anomaly detection) will run a time-series watch over these
+clusters; M4A only produces the static snapshot.
+
+---
+
 ## Not yet implemented (intentionally)
 
 - Real-LLM ABSA over the full 245k MVP subset.
-- BERTopic clustering.
-- EWMA anomaly detection.
+- LLM-generated cluster labels (M4A uses offline TF-IDF labels).
+- EWMA anomaly detection (Milestone 4B).
 - LangGraph agent / RAG query layer.
 - Streamlit dashboard.
 
