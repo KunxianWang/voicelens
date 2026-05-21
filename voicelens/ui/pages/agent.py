@@ -21,12 +21,37 @@ _EXAMPLES = (
     "Which aspect has the most negative mentions?",
 )
 
+_HELP_TEXT = """\
+Ask one question in plain language. A deterministic keyword router
+sends it to **one** of these tools:
+
+- **Retrieval answer** — *complaints, what customers say, examples,
+  quotes* about an aspect (reliability, bluetooth, charging, price,
+  delivery, sound quality, overheating, battery). Returns a
+  citation-grounded answer.
+- **Incident summary** — *incidents, spikes, anomalies, emerging
+  issues*. Returns the top anomaly incidents.
+- **Analytics summary** — *how many, counts, distribution, top aspect,
+  most common*. Returns aspect / sentiment / severity statistics.
+- **Insufficient scope** — anything outside VoC analytics gets a safe
+  refusal rather than a guessed answer.
+
+This is a single routing pass — no memory, no actions, no planning.
+"""
+
 
 def _render_result(summary: dict) -> None:
     route = summary["route"]
-    st.info(f"**Route:** `{route}` — {ROUTE_DESCRIPTIONS.get(route, '')}")
+    st.info(f"**Route selected:** `{route}` — {ROUTE_DESCRIPTIONS.get(route, '')}")
+
+    meta = st.columns(3)
+    meta[0].metric("Route", route)
+    meta[1].metric("Citations", len(summary["citations"]))
+    meta[2].metric("Warnings", len(summary["warnings"]))
     if summary["filters"]:
         st.caption(f"Extracted filters: `{summary['filters']}`")
+    else:
+        st.caption("Extracted filters: (none)")
 
     st.subheader("Answer")
     if route == "insufficient_scope":
@@ -49,6 +74,7 @@ def _render_result(summary: dict) -> None:
 
     warnings = summary["warnings"]
     if warnings:
+        st.markdown("**Warnings**")
         for w in warnings:
             st.caption(f"⚠ {w}")
     st.caption(
@@ -74,6 +100,9 @@ def render() -> None:
             "`mock` works offline. `anthropic` / `openai` need an API key "
             "and only affect the retrieval route."
         )
+
+    with st.expander("ℹ️ What can I ask?"):
+        st.markdown(_HELP_TEXT)
 
     st.caption("Example questions: " + " · ".join(f"*{e}*" for e in _EXAMPLES))
     question = st.text_input(

@@ -63,7 +63,8 @@ data/*
 !data/README.md
 !data/.gitkeep
 # data/eval holds generated eval artefacts (ignored) — except the
-# hand-curated refined golden set, which is not regenerable and is tracked.
+# hand-curated golden sets, which are not regenerable and are tracked.
 !data/eval/
 data/eval/*
 !data/eval/retrieval_goldens_refined.jsonl
+!data/eval/agent_smoke_goldens.jsonl

@@ -147,27 +147,33 @@ python scripts/ask_voicelens.py \
 ## 5c. Optional final step — agent routing (M6B beta)
 
 Open the **Agent Q&A (Beta)** page. The agent reads a question, a
-deterministic LangGraph router picks one of three tools, and the page
-shows *which* route it chose. Ask these three in order:
+deterministic LangGraph router picks one of four tools, and the page
+shows *which* route it chose. Ask these four in order:
 
 1. `What are the main reliability complaints?`
    → routes to **retrieval_answer** — a cited answer with evidence.
-2. `Which issues spiked recently?`
-   → routes to **incident_summary** — top EWMA-detected incidents.
-3. `Which aspect has the most negative mentions?`
+2. `Which aspect has the most negative mentions?`
    → routes to **analytics_summary** — aspect / sentiment statistics.
+3. `Which issues spiked recently?`
+   → routes to **incident_summary** — top EWMA-detected incidents.
+4. `Should I buy Apple stock today?`
+   → routes to **insufficient_scope** — a safe refusal, *no* guessed
+   answer and no citations.
 
-Each result shows the selected route at the top; the retrieval route
-additionally attaches a citations list. The same thing from the CLI:
+Each result shows the selected route, extracted filters, citation count
+and warnings; the retrieval route additionally attaches a citations
+list. The same thing from the CLI:
 
 ```bash
 python scripts/ask_agent.py --question "Which issues spiked recently?"
 ```
 
-> *Talking point:* "One question, three different data paths — reviews,
-> the incident table, or aggregate stats — chosen by a transparent
-> keyword router. It is a controlled routing workflow, deliberately not
-> an autonomous agent: no memory, no actions, one routing decision."
+> *Talking point:* "One question, four different data paths — reviews,
+> aggregate stats, the incident table, or an honest refusal — chosen by
+> a transparent keyword router. It is a controlled routing workflow,
+> deliberately not an autonomous agent: no memory, no actions, one
+> routing decision. `make evaluate-agent` scores it on 20 golden
+> questions — route accuracy, citation rate, refusal rate."
 
 ---
 

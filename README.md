@@ -86,6 +86,23 @@ The retrieval and agent pages cover answer generation and routing; a full autono
 
 ---
 
+## Agentic Workflow
+
+VoiceLens ships a **lightweight LangGraph router** (M6B), not an autonomous multi-agent system. One question makes one routing decision and runs one tool — there is no memory, no autonomous actions, no multi-agent collaboration, and no multi-step planning.
+
+A deterministic keyword router sends each question to one of four routes:
+
+| Route | Handles | Grounding |
+|---|---|---|
+| `retrieval_answer` | complaints, quotes, "what customers say" about an aspect | **citation-grounded** — every claim cites a retrieved review |
+| `analytics_summary` | counts, distributions, "top aspect", "most common" | **database-grounded** — aggregate ABSA stats from Postgres |
+| `incident_summary` | spikes, anomalies, emerging issues | **database-grounded** — the anomaly `incident` table |
+| `insufficient_scope` | anything outside VoC analytics | a safe refusal — no hallucinated answer |
+
+Retrieval answers are produced by the M6A citation-grounded generator (unsupported citation markers are stripped; unanswerable queries return "insufficient evidence"). Analytics and incident answers are read directly from the database. The workflow is evaluated by `make evaluate-agent` against a 20-question golden set (route accuracy, citation rate, refusal rate). The full autonomous agent — planner, memory, tool-use, HITL — remains designed-only (§8, §11).
+
+---
+
 ## 2. Why this project
 
 Cross-border CE brands like **Anker** ship hundreds of SKUs into 10+ marketplaces and 6+ languages. The most valuable, hardest-to-extract data asset they own is **unstructured customer voice** — Amazon reviews, Q&A, social comments, support tickets.

@@ -15,7 +15,7 @@
         tune-retrieval-hybrid-refined \
         cluster-v2 cluster-stats anomaly-v2 anomaly-stats \
         dashboard dashboard-dev demo-healthcheck \
-        ask-voicelens rag-smoke ask-agent agent-smoke \
+        ask-voicelens rag-smoke ask-agent agent-smoke evaluate-agent \
         test lint install
 
 PYTHON ?= python
@@ -108,6 +108,7 @@ help:
 	@echo "  rag-smoke                smoke-test the answer generator (5 questions)"
 	@echo "  ask-agent                ask the LangGraph agent (route -> tool -> answer)"
 	@echo "  agent-smoke              smoke-test the agent workflow (10 questions)"
+	@echo "  evaluate-agent           score the agent on the 20-question golden set"
 	@echo "  db-stats                 print review / brand / rating / DQ counts"
 	@echo "  test                     run pytest (uses SQLite in-memory)"
 	@echo "  lint                     ruff check"
@@ -410,6 +411,9 @@ ask-agent:
 
 agent-smoke:
 	$(PYTHON) scripts/evaluate_agent_smoke.py --provider "$(RAG_PROVIDER)"
+
+evaluate-agent:
+	$(PYTHON) scripts/evaluate_agent.py --provider "$(RAG_PROVIDER)"
 
 evaluate-absa:
 	$(PYTHON) scripts/evaluate_absa.py
