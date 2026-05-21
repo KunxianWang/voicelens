@@ -8,11 +8,78 @@
 
 ## 1. Project Summary
 
-VoiceLens is a **data-engineering-first** platform for cross-border e-commerce VoC analytics. The core of the project is the ETL + ML pipeline that turns raw reviews into governed, queryable, aspect-labeled facts. On top of that data, an LLM-driven query layer answers analyst questions with inline citations.
+VoiceLens is a **data-engineering-first** VoC analytics platform for cross-border e-commerce. It is an end-to-end pipeline — **ingestion → data-quality → ABSA → retrieval → clustering → anomaly detection → dashboard** — that turns raw consumer-electronics reviews into governed, queryable, aspect-labelled facts and surfaces emerging quality issues. An LLM-driven query/agent layer is **designed** on top (§8, §11) but deliberately not built yet.
 
-**MVP stack:** Python · Prefect · Postgres · Qdrant · BERTopic / HDBSCAN · FastAPI · Streamlit · LangGraph · Docker
+**Implemented stack:** Python 3.11 · Prefect 3 · Postgres · Qdrant · scikit-learn (TF-IDF + KMeans) · BM25 + bge dense hybrid retrieval · Claude (structured ABSA) · Streamlit · Docker · pytest / ruff
 
-**Target stack (post-MVP, planned not built):** ClickHouse · Mem0 · Next.js · Langfuse · OpenTelemetry · K8s · vLLM · reranker fine-tuning
+**Planned stack (post-MVP, designed not built):** LangGraph agent · FastAPI · BERTopic/HDBSCAN · reranker · ClickHouse · Mem0 · Next.js · Langfuse · OpenTelemetry · K8s · vLLM
+
+---
+
+## Current MVP Status
+
+> Snapshot as of **Milestone 5B**. Every number below is from a real pipeline run on the working dataset — no projections. See [`docs/demo.md`](docs/demo.md) for the live demo walkthrough.
+
+### Implemented vs planned
+
+| Stage | Status | Notes |
+|---|---|---|
+| Ingestion + Data Quality | ✅ Implemented | Deterministic MVP subset; DQ gates with dead-letter routing |
+| LLM ABSA (7-aspect ontology v2) | ✅ Pipeline + eval · 🚧 1k coverage | Ran on a **1k real Claude batch** — the full 245k pass is **not** done |
+| Embedding + Qdrant index | ✅ Implemented | 1k ABSA-processed subset indexed |
+| Hybrid retrieval + evaluation | ✅ Implemented | BM25 + dense, RRF fusion; refined-golden eval harness |
+| Issue clustering | ✅ Implemented | TF-IDF + KMeans per aspect (BERTopic optional) |
+| Anomaly detection | ✅ Implemented | EWMA z-score; cluster-level + aspect-level fallback |
+| Streamlit dashboard | ✅ Implemented | 6 pages — see §10 |
+| RAG query layer / LangGraph agent | ❌ Designed, not built | Retrieval page is **search-only** |
+
+### Real metrics
+
+**Data ingestion & quality**
+- **43.9M** Amazon review rows + **1.6M** product-metadata rows scanned to resolve the brand allowlist.
+- **253.5k**-review deterministic MVP subset built (reproducible by seed).
+- **245,961** valid MVP reviews loaded into Postgres after DQ — **97.03%** DQ pass rate, failures bucketed by reason code.
+
+**ABSA (1k batch — full corpus pass not yet run)**
+- **1,000**-review real Claude ABSA batch under aspect ontology **v2** (≈1.2k aspect mentions extracted); kept to 1k to bound LLM cost while proving the pipeline + eval harness.
+- Holdout eval: **macro-F1 0.7074**, precision 0.8409, recall 0.8043, **Cohen's κ 0.9336**, **evidence-verbatim rate 1.0**.
+
+**Retrieval**
+- **1,000** points indexed in Qdrant (`reviews_v2`).
+- Refined-golden eval: **Hit@5 0.959**, **Recall@20 0.886**, **MRR@10 0.849**, filter precision@10 1.00.
+
+**Analytics**
+- **44** issue clusters over the negative ABSA mentions.
+- **23** emerging-issue incidents (cluster-level + aspect-level fallback).
+
+**Engineering**
+- **350** automated tests passing; `ruff` lint clean.
+
+> **Honesty note:** ABSA has been validated end-to-end but only *run* on a 1k batch — VoiceLens does **not** claim full 245k ABSA coverage. Scaling that batch is a budgeted follow-up, not a code change.
+
+---
+
+## Demo Walkthrough
+
+Full step-by-step script (with talking points) lives in [`docs/demo.md`](docs/demo.md). Short version:
+
+```bash
+make up                # 1. start Postgres + Qdrant
+make init-db           #    (only if schema not yet created)
+make demo-healthcheck  # 2. confirm infra is demo-ready  -> "READY TO DEMO"
+make dashboard         # 3. launch the Streamlit dashboard
+```
+
+Then, in the dashboard, move through the six pages in order:
+
+1. **Overview** — pipeline at a glance: review / ABSA / cluster / incident counts and distribution charts.
+2. **ABSA Distribution** — aspect × sentiment matrix, severity breakdown, and the **reliability spotlight** (the dominant negative signal).
+3. **Issue Clusters** — clusters ranked by severity-weighted size, drill-down into member reviews.
+4. **Emerging Incidents** — EWMA-detected spikes; toggle cluster-level vs aspect-level granularity.
+5. **Retrieval Search** — hybrid search demo. Try: `product stopped working after a week` · `bluetooth keeps disconnecting` · `expensive not worth the price`.
+6. **Data Quality** — DQ pass/fail by reason, ABSA processing-reliability rates.
+
+The retrieval page is **search-only** — no LLM answer generation (that is a later milestone).
 
 ---
 
@@ -331,15 +398,16 @@ All eval results land in the README at the end of week 5 (replacing the placehol
 
 ## 10. Dashboard (Streamlit)
 
-5 pages:
+**Implemented** — 6 pages, launched with `make dashboard` (`voicelens/ui/`):
 
-1. **SKU Overview** — picker (brand → SKU); weekly complaint volume with EWMA band; incident markers.
-2. **Aspect Distribution** — stacked bar of aspect × sentiment for selected SKU, last 90 days.
-3. **Top Emerging Issues** — `incident` rows sorted by `severity_score`; click expands cluster reviews.
-4. **Chat** — Q1–Q4 with streamed response and clickable inline citations.
-5. **Anomaly Alerts** — list view of incidents with `posted_at`, `aspect`, `severity`, `z_score`, LLM-narrated summary.
+1. **Overview** — headline counts (reviews, ABSA-processed, mentions, clusters, incidents, Qdrant points) and distribution charts (brand, ABSA status, aspect, sentiment).
+2. **ABSA Distribution** — aspect × sentiment matrix, severity distribution for negatives, negative examples with evidence quotes, and a reliability spotlight. Filterable by brand / aspect / sentiment / severity / rating.
+3. **Issue Clusters** — M4A clusters ranked by severity-weighted size, with drill-down into keywords, representative quotes and member reviews.
+4. **Emerging Incidents** — M4B anomaly incidents ranked by severity score, with the deterministic pipeline summary; filterable by aspect and granularity (cluster-level / aspect-level fallback).
+5. **Retrieval Search** — search-only demo over the Qdrant index (hybrid / dense / lexical, default hybrid / `rrf_equal`). No LLM answer generation.
+6. **Data Quality** — ingest-run summaries, DQ pass/fail by reason, ABSA status distribution, processed / mention coverage rates and LLM-batch failed/invalid rates.
 
-A 6th page, **Data Quality**, shows DQ pass rates per check and dead-letter volumes by reason code — directly demonstrates the data-engineering surface.
+The dashboard is **read-only** — it visualises existing pipeline outputs and never re-runs a flow or calls an LLM. The **Chat** page (Q1–Q4 with inline citations) is **planned, not built** — it depends on the RAG query layer (§8).
 
 ---
 
@@ -396,14 +464,13 @@ Each item has an ADR or design note pointing to the rationale.
 
 ## 12. Resume Bullets
 
-**MVP-honest** (numbers filled at end of week 5 from real eval runs):
+**MVP-honest** (real numbers from pipeline runs as of Milestone 5B — safe to use):
 
-- Built **VoiceLens**, a VoC data-engineering platform over **200k+ Amazon reviews** of consumer-electronics brands, with a Prefect-orchestrated medallion pipeline (Bronze → Silver → Gold) into Postgres + Qdrant.
-- Implemented an automated **Data Quality** layer (duplicate detection, SKU/ASIN validation, rating-range check, language-confidence threshold, empty/spam filter, ABSA schema + verbatim-quote validation) with dead-letter routing and per-check pass-rate metrics surfaced to dashboards.
-- Built an **LLM-based ABSA pipeline** (Claude / OpenAI structured outputs) against a 7-aspect ontology versioned in Postgres; **macro-F1 \<X\>** on a 200-review hand-labeled holdout; bulk-tagged 200k+ reviews.
-- Engineered **anomaly detection** with EWMA + z-score on per-{SKU, aspect, week} complaint volume, severity-weighted; P@10 = **\<P\>** on 12 known historical events in backtest.
-- Built **agentic-RAG query layer** with hybrid retrieval (Qdrant BM25 + bge-m3) + reranker + self-query filter extraction; **Recall@5 = \<R\>** on 50 hand-built pairs; LangGraph 3-node supervisor producing inline-citation responses.
-- Shipped Streamlit dashboard (SKU trend, aspect distribution, emerging issues, chat, alerts, **DQ pass-rate page**); full local reproduction via `docker compose up`.
+- Built **VoiceLens**, a data-engineering-first VoC analytics platform: scanned **43.9M** Amazon review rows + **1.6M** product-metadata rows, built a reproducible **253.5k**-review MVP subset, and loaded **245,961** reviews into Postgres via a Prefect-orchestrated pipeline.
+- Implemented an automated **Data Quality** layer (duplicate detection, ASIN validation, rating-range, language-confidence, empty/spam, ABSA schema + verbatim-quote checks) with dead-letter routing and per-reason metrics — **97.03%** DQ pass rate.
+- Built an **LLM-based ABSA pipeline** (Claude structured outputs) against a 7-aspect ontology versioned in Postgres, with a hand-labelled holdout eval harness: **macro-F1 0.71**, **Cohen's κ 0.93**, **evidence-verbatim rate 1.0** on a 1k-review batch.
+- Engineered **hybrid retrieval** (Qdrant BM25 + dense, RRF fusion) with a refined-golden eval harness — **Hit@5 0.96, Recall@20 0.89, MRR@10 0.85** — plus **issue clustering** (TF-IDF + KMeans, 44 clusters) and **EWMA anomaly detection** (z-score, 23 incidents).
+- Shipped a 6-page **Streamlit analytics dashboard** (overview, ABSA distribution, clusters, emerging incidents, retrieval search, data quality); **350** automated tests, lint-clean, fully reproducible locally via `make`.
 
 **Aspirational bullets** (only after corresponding post-MVP items in §11 are built — do not use on resume yet):
 
@@ -417,33 +484,35 @@ Each item has an ADR or design note pointing to the rationale.
 
 ## 13. Status / Scope Honesty
 
-- ✅ Target architecture designed (this README §11 + `design/` ADRs).
-- 🚧 **4–6 week MVP in flight** — scope locked in [`design/04-mvp-spec.md`](design/04-mvp-spec.md). English-only, Amazon-only, 3–5 brands, 200k–500k reviews, Streamlit dashboard, no HITL writes, no Mem0, no critique node.
+- ✅ **MVP pipeline implemented** — ingestion → DQ → ABSA → embed → cluster → anomaly → dashboard. See *Current MVP Status* above for real metrics.
+- 🚧 **ABSA coverage is a 1k batch**, not the full 245k loaded corpus — bounded deliberately to control LLM cost while proving the pipeline and eval harness. The full pass is a budgeted follow-up.
+- ❌ **RAG query layer / LangGraph agent not built** — designed in §8 and §11; the dashboard's retrieval page is search-only.
 - 📋 Post-MVP backlog (§11) is **designed, not built**.
 - ❌ Not connected to a real seller account — uses public datasets only (Amazon Reviews 2023, McAuley Lab). Architecture preserves the integration surface a real deployment would need (SP-API auth, throttling, idempotency) so a future port is contained.
 
 ---
 
-## 14. How to run (when implemented)
+## 14. How to run
+
+Full developer guide in [`README_DEV.md`](README_DEV.md); demo walkthrough in [`docs/demo.md`](docs/demo.md). Quickstart:
 
 ```bash
-# infra
-docker compose -f ops/docker/compose.yaml up -d   # postgres + qdrant + prefect
+# 1. infra — Postgres + Qdrant
+make up
+make init-db                # only if the schema is not yet created
 
-# data
-make seed                                         # downloads & filters Amazon Reviews 2023 subset
+# 2. confirm the demo is ready
+make demo-healthcheck        # -> "READY TO DEMO"
 
-# run offline pipeline
-prefect deploy pipeline/flows/full_pipeline.py
-prefect deployment run "full-pipeline/mvp"
+# 3. launch the dashboard
+make dashboard               # streamlit run voicelens/ui/app.py
 
-# API + dashboard
-uvicorn voicelens.api.main:app --reload
-streamlit run voicelens/ui/app.py
-
-# ask a question
-curl -N -X POST localhost:8000/chat -d '{"q": "Top emerging complaints on PowerCore 24K this month"}'
+# checks
+make test                    # 350 tests, SQLite in-memory
+make lint                    # ruff
 ```
+
+Rebuilding the pipeline data (ingestion → ABSA → embed → cluster → anomaly) is documented in `README_DEV.md` and `docs/demo.md` — re-running the ABSA batch consumes LLM budget, so the working dataset ships pre-built.
 
 ---
 

@@ -14,7 +14,7 @@
         validate-retrieval-goldens-refined evaluate-retrieval-refined-lexical-first \
         tune-retrieval-hybrid-refined \
         cluster-v2 cluster-stats anomaly-v2 anomaly-stats \
-        dashboard dashboard-dev \
+        dashboard dashboard-dev demo-healthcheck \
         test lint install
 
 PYTHON ?= python
@@ -94,6 +94,7 @@ help:
 	@echo "  anomaly-stats            summarise the incident table"
 	@echo "  dashboard                launch the Streamlit analytics dashboard"
 	@echo "  dashboard-dev            launch the dashboard with auto-reload on save"
+	@echo "  demo-healthcheck         verify Postgres / Qdrant / dashboard are demo-ready"
 	@echo "  db-stats                 print review / brand / rating / DQ counts"
 	@echo "  test                     run pytest (uses SQLite in-memory)"
 	@echo "  lint                     ruff check"
@@ -375,6 +376,9 @@ dashboard:
 
 dashboard-dev:
 	$(PYTHON) -m streamlit run voicelens/ui/app.py --server.runOnSave true
+
+demo-healthcheck:
+	$(PYTHON) scripts/demo_healthcheck.py
 
 evaluate-absa:
 	$(PYTHON) scripts/evaluate_absa.py

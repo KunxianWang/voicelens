@@ -1647,9 +1647,10 @@ LLM, and is **not** the final RAG layer.
 ### Required infra
 
 ```bash
-make up            # Postgres + Qdrant containers
-make init-db       # only if the schema is not yet created
-make dashboard     # streamlit run voicelens/ui/app.py
+make up                # Postgres + Qdrant containers
+make init-db           # only if the schema is not yet created
+make demo-healthcheck  # verify Postgres / Qdrant / dashboard are demo-ready
+make dashboard         # streamlit run voicelens/ui/app.py
 ```
 
 `make dashboard` needs the `dashboard` extra (`pip install -e .[dashboard]`,
@@ -1657,6 +1658,11 @@ brings in streamlit). `make dashboard-dev` adds auto-reload on save. The
 retrieval page additionally needs the Qdrant index (`make embed-v2-1k`)
 and the `retrieval` extra; every page degrades to an empty state if its
 data is missing rather than crashing.
+
+`make demo-healthcheck` (`scripts/demo_healthcheck.py`) is a read-only
+pre-demo check: Postgres reachable + required tables non-empty, Qdrant
+`reviews_v2` populated, and the dashboard module imports. The full
+recruiter/interviewer demo script lives in [`docs/demo.md`](docs/demo.md).
 
 ### The six pages
 
