@@ -44,7 +44,7 @@ make dashboard         # streamlit run voicelens/ui/app.py
 ```
 
 Streamlit prints a local URL (default `http://localhost:8501`). Open it
-in a browser. The left sidebar lists the six pages.
+in a browser. The left sidebar lists the seven pages.
 
 ---
 
@@ -140,8 +140,34 @@ python scripts/ask_voicelens.py \
 > *Talking point:* "This is a citation-grounded answer generator — every
 > claim is bound to a retrieved review, unsupported citations are
 > stripped, and an unanswerable query returns 'insufficient evidence'
-> instead of hallucinating. It is deliberately *not* an agent yet: no
-> planner, no memory, no tools — that is the next milestone."
+> instead of hallucinating."
+
+---
+
+## 5c. Optional final step — agent routing (M6B beta)
+
+Open the **Agent Q&A (Beta)** page. The agent reads a question, a
+deterministic LangGraph router picks one of three tools, and the page
+shows *which* route it chose. Ask these three in order:
+
+1. `What are the main reliability complaints?`
+   → routes to **retrieval_answer** — a cited answer with evidence.
+2. `Which issues spiked recently?`
+   → routes to **incident_summary** — top EWMA-detected incidents.
+3. `Which aspect has the most negative mentions?`
+   → routes to **analytics_summary** — aspect / sentiment statistics.
+
+Each result shows the selected route at the top; the retrieval route
+additionally attaches a citations list. The same thing from the CLI:
+
+```bash
+python scripts/ask_agent.py --question "Which issues spiked recently?"
+```
+
+> *Talking point:* "One question, three different data paths — reviews,
+> the incident table, or aggregate stats — chosen by a transparent
+> keyword router. It is a controlled routing workflow, deliberately not
+> an autonomous agent: no memory, no actions, one routing decision."
 
 ---
 
@@ -205,9 +231,9 @@ automated capture needs a browser driver). To add them for a portfolio
 write-up, capture manually:
 
 1. `make dashboard`, open `http://localhost:8501`.
-2. For each of the six pages, capture the browser window.
+2. For each of the seven pages, capture the browser window.
 3. Save as `docs/screenshots/<page>.png` (e.g. `overview.png`,
    `absa.png`, `clusters.png`, `incidents.png`, `retrieval.png`,
-   `data-quality.png`).
+   `agent.png`, `data-quality.png`).
 
 See `docs/screenshots/README.md` for the naming convention.

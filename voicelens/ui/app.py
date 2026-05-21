@@ -19,6 +19,7 @@ import streamlit as st
 
 from voicelens.ui.pages import (
     absa,
+    agent,
     clusters,
     data_quality,
     incidents,
@@ -28,7 +29,7 @@ from voicelens.ui.pages import (
 
 
 def build_navigation():
-    """Assemble the six dashboard pages and return the selected page."""
+    """Assemble the seven dashboard pages and return the selected page."""
     pages = [
         st.Page(
             overview.render, title="Overview", icon="📊",
@@ -49,6 +50,10 @@ def build_navigation():
         st.Page(
             retrieval.render, title="Retrieval Search", icon="🔎",
             url_path="retrieval",
+        ),
+        st.Page(
+            agent.render, title="Agent Q&A", icon="🤖",
+            url_path="agent",
         ),
         st.Page(
             data_quality.render, title="Data Quality", icon="🩺",

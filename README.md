@@ -30,8 +30,10 @@ VoiceLens is a **data-engineering-first** VoC analytics platform for cross-borde
 | Hybrid retrieval + evaluation | ✅ Implemented | BM25 + dense, RRF fusion; refined-golden eval harness |
 | Issue clustering | ✅ Implemented | TF-IDF + KMeans per aspect (BERTopic optional) |
 | Anomaly detection | ✅ Implemented | EWMA z-score; cluster-level + aspect-level fallback |
-| Streamlit dashboard | ✅ Implemented | 6 pages — see §10 |
-| RAG query layer / LangGraph agent | ❌ Designed, not built | Retrieval page is **search-only** |
+| Streamlit dashboard | ✅ Implemented | 7 pages — see §10 |
+| Citation-grounded answer generation | ✅ Implemented | M6A — retrieve-then-answer with citation guardrails |
+| LangGraph router workflow | ✅ Implemented | M6B — deterministic route → one tool; single pass |
+| Autonomous agent (memory, actions, planning) | ❌ Designed, not built | §8 / §11 — not an autonomous system |
 
 ### Real metrics
 
@@ -70,16 +72,17 @@ make demo-healthcheck  # 2. confirm infra is demo-ready  -> "READY TO DEMO"
 make dashboard         # 3. launch the Streamlit dashboard
 ```
 
-Then, in the dashboard, move through the six pages in order:
+Then, in the dashboard, move through the seven pages in order:
 
 1. **Overview** — pipeline at a glance: review / ABSA / cluster / incident counts and distribution charts.
 2. **ABSA Distribution** — aspect × sentiment matrix, severity breakdown, and the **reliability spotlight** (the dominant negative signal).
 3. **Issue Clusters** — clusters ranked by severity-weighted size, drill-down into member reviews.
 4. **Emerging Incidents** — EWMA-detected spikes; toggle cluster-level vs aspect-level granularity.
-5. **Retrieval Search** — hybrid search demo. Try: `product stopped working after a week` · `bluetooth keeps disconnecting` · `expensive not worth the price`.
-6. **Data Quality** — DQ pass/fail by reason, ABSA processing-reliability rates.
+5. **Retrieval Search** — hybrid search demo plus a beta citation-grounded answer generator.
+6. **Agent Q&A** — ask a question; a deterministic LangGraph router picks retrieval / incident / analytics and shows the chosen route.
+7. **Data Quality** — DQ pass/fail by reason, ABSA processing-reliability rates.
 
-The retrieval page is **search-only** — no LLM answer generation (that is a later milestone).
+The retrieval and agent pages cover answer generation and routing; a full autonomous agent (memory, actions, planning) is not built.
 
 ---
 
@@ -398,16 +401,17 @@ All eval results land in the README at the end of week 5 (replacing the placehol
 
 ## 10. Dashboard (Streamlit)
 
-**Implemented** — 6 pages, launched with `make dashboard` (`voicelens/ui/`):
+**Implemented** — 7 pages, launched with `make dashboard` (`voicelens/ui/`):
 
 1. **Overview** — headline counts (reviews, ABSA-processed, mentions, clusters, incidents, Qdrant points) and distribution charts (brand, ABSA status, aspect, sentiment).
 2. **ABSA Distribution** — aspect × sentiment matrix, severity distribution for negatives, negative examples with evidence quotes, and a reliability spotlight. Filterable by brand / aspect / sentiment / severity / rating.
 3. **Issue Clusters** — M4A clusters ranked by severity-weighted size, with drill-down into keywords, representative quotes and member reviews.
 4. **Emerging Incidents** — M4B anomaly incidents ranked by severity score, with the deterministic pipeline summary; filterable by aspect and granularity (cluster-level / aspect-level fallback).
-5. **Retrieval Search** — search-only demo over the Qdrant index (hybrid / dense / lexical, default hybrid / `rrf_equal`). No LLM answer generation.
-6. **Data Quality** — ingest-run summaries, DQ pass/fail by reason, ABSA status distribution, processed / mention coverage rates and LLM-batch failed/invalid rates.
+5. **Retrieval Search** — hybrid / dense / lexical search over the Qdrant index, plus a beta citation-grounded answer generator (M6A).
+6. **Agent Q&A** — ask a question; a deterministic LangGraph router (M6B) sends it to retrieval / incident / analytics and shows the route, answer and citations.
+7. **Data Quality** — ingest-run summaries, DQ pass/fail by reason, ABSA status distribution, processed / mention coverage rates and LLM-batch failed/invalid rates.
 
-The dashboard is **read-only** — it visualises existing pipeline outputs and never re-runs a flow or calls an LLM. The **Chat** page (Q1–Q4 with inline citations) is **planned, not built** — it depends on the RAG query layer (§8).
+The dashboard is **read-only** — it visualises existing pipeline outputs and never re-runs a flow. The M6B agent is a single deterministic routing pass; a full autonomous agent (memory, actions, multi-step planning) is **designed, not built** (§8, §11).
 
 ---
 
@@ -486,7 +490,7 @@ Each item has an ADR or design note pointing to the rationale.
 
 - ✅ **MVP pipeline implemented** — ingestion → DQ → ABSA → embed → cluster → anomaly → dashboard. See *Current MVP Status* above for real metrics.
 - 🚧 **ABSA coverage is a 1k batch**, not the full 245k loaded corpus — bounded deliberately to control LLM cost while proving the pipeline and eval harness. The full pass is a budgeted follow-up.
-- ❌ **RAG query layer / LangGraph agent not built** — designed in §8 and §11; the dashboard's retrieval page is search-only.
+- ✅ **Citation-grounded answer generation + a LangGraph router** are built (M6A / M6B) — but this is a single deterministic routing pass, **not** an autonomous agent. No memory, no autonomous actions, no multi-step planning; the full agent in §8 / §11 is still designed-only.
 - 📋 Post-MVP backlog (§11) is **designed, not built**.
 - ❌ Not connected to a real seller account — uses public datasets only (Amazon Reviews 2023, McAuley Lab). Architecture preserves the integration surface a real deployment would need (SP-API auth, throttling, idempotency) so a future port is contained.
 

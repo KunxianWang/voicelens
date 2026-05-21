@@ -1786,11 +1786,85 @@ shows a friendly message pointing back to `mock` — it never crashes.
 
 ---
 
+## Milestone 6B: Lightweight LangGraph agent workflow
+
+M6A answered one fixed question shape (retrieve-then-answer). M6B adds
+the smallest useful step toward an agent: a **router** that reads a
+question and picks *which* tool should handle it — retrieval, incident
+summary, or analytics — then runs that one tool. It is a controlled
+agentic-RAG workflow, not an autonomous system.
+
+### How it differs from a full autonomous agent
+
+The graph is `START → route_question → <one tool> → format_response →
+END`. There is exactly one routing decision and exactly one tool call:
+
+- **no memory** — each question is independent;
+- **no autonomous actions** — every tool is read-only;
+- **no multi-agent collaboration** — one graph, one path;
+- **no multi-step planning** — no loops, no re-planning, no query
+  decomposition beyond the single route choice.
+
+LangGraph supplies the `StateGraph` plumbing; every decision in the
+graph is plain, deterministic Python.
+
+### Supported routes
+
+`voicelens/agent/` — `state.py` (the `AgentState` TypedDict),
+`router.py` (keyword classifier + filter extraction), `tools.py` (the
+route nodes), `graph.py` (the compiled workflow), `prompts.py`
+(route descriptions + the out-of-scope message).
+
+| Route | Trigger keywords | Tool behaviour |
+|---|---|---|
+| `retrieval_answer` | complaint, customers say, reviews, quote, example (or any aspect name) | hybrid retrieval → M6A citation-grounded answer |
+| `incident_summary` | incident, spike, anomaly, emerging, surge | top incidents from the `incident` table |
+| `analytics_summary` | how many, count, distribution, top aspect, most common | aspect / sentiment / severity / ABSA-status stats from Postgres |
+| `insufficient_scope` | (nothing matched) | a safe out-of-scope message — no hallucinated answer |
+
+The router (`classify_route`) is deterministic keyword matching, checked
+in priority order incident → analytics → retrieval. `extract_filters`
+pulls aspect / sentiment / brand hints from the question for the
+retrieval route. Three of the four tools are non-LLM; only
+`retrieval_answer` calls the M6A answer provider.
+
+### Run it
+
+```bash
+# CLI — route + answer for one question
+make ask-agent                            # uses AGENT_QUESTION / RAG_PROVIDER
+python scripts/ask_agent.py --question "Which issues spiked recently?"
+
+# Smoke test — 10 fixed questions (4 retrieval / 3 analytics / 2 incident / 1 nonsense)
+make agent-smoke                           # RAG_PROVIDER=mock by default
+```
+
+`make agent-smoke` checks the router picks the expected route, every
+route returns a non-empty answer, the retrieval route attaches
+citations, the analytics route returns numeric content, the incident
+route mentions incident fields, and the nonsense question is routed to
+insufficient scope without hallucinating.
+
+### Dashboard
+
+A new **Agent Q&A (Beta)** page asks a question through the workflow
+and shows the selected route, the answer, any citations and any
+warnings. The Retrieval Search page is unchanged.
+
+### Limitations
+
+- No memory, no autonomous actions, no multi-agent collaboration.
+- No multi-step planning beyond the single routing decision.
+- The router is keyword-based — it does not understand paraphrase the
+  way an LLM planner would; an LLM planner is a later milestone.
+
+---
+
 ## Not yet implemented (intentionally)
 
 - Real-LLM ABSA over the full 245k MVP subset.
 - LLM-generated cluster labels (M4A uses offline TF-IDF labels).
-- LangGraph planner / agent, tool routing, and memory (M6A is a single
-  retrieve-then-answer pass, not an agent).
+- LLM planner, agent memory, autonomous actions, and multi-agent
+  collaboration (M6B is a single deterministic routing pass).
 
 These are scoped to the next milestones. See `design/04-mvp-spec.md` §7 for the week-by-week plan.

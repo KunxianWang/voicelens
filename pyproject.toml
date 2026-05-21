@@ -50,6 +50,11 @@ dashboard = [
     # dependency tree (pyarrow, altair, tornado).
     "streamlit>=1.40",
 ]
+agent = [
+    # M6B lightweight LangGraph router/workflow. The graph itself is
+    # deterministic — langgraph supplies the StateGraph plumbing only.
+    "langgraph>=0.2",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

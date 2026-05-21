@@ -15,7 +15,7 @@
         tune-retrieval-hybrid-refined \
         cluster-v2 cluster-stats anomaly-v2 anomaly-stats \
         dashboard dashboard-dev demo-healthcheck \
-        ask-voicelens rag-smoke \
+        ask-voicelens rag-smoke ask-agent agent-smoke \
         test lint install
 
 PYTHON ?= python
@@ -47,6 +47,8 @@ RAG_PROVIDER ?= mock
 ASK_QUESTION ?= What are customers saying about products that stopped working?
 ASK_MODE ?= hybrid
 ASK_TOP_K ?= 8
+# M6B agent workflow.
+AGENT_QUESTION ?= What are the main reliability complaints?
 
 help:
 	@echo "Targets:"
@@ -104,6 +106,8 @@ help:
 	@echo "  demo-healthcheck         verify Postgres / Qdrant / dashboard are demo-ready"
 	@echo "  ask-voicelens            ask a question -> retrieve + citation-grounded answer"
 	@echo "  rag-smoke                smoke-test the answer generator (5 questions)"
+	@echo "  ask-agent                ask the LangGraph agent (route -> tool -> answer)"
+	@echo "  agent-smoke              smoke-test the agent workflow (10 questions)"
 	@echo "  db-stats                 print review / brand / rating / DQ counts"
 	@echo "  test                     run pytest (uses SQLite in-memory)"
 	@echo "  lint                     ruff check"
@@ -398,6 +402,14 @@ ask-voicelens:
 
 rag-smoke:
 	$(PYTHON) scripts/evaluate_rag_smoke.py --provider "$(RAG_PROVIDER)"
+
+ask-agent:
+	$(PYTHON) scripts/ask_agent.py \
+	  --question "$(AGENT_QUESTION)" \
+	  --provider "$(RAG_PROVIDER)"
+
+agent-smoke:
+	$(PYTHON) scripts/evaluate_agent_smoke.py --provider "$(RAG_PROVIDER)"
 
 evaluate-absa:
 	$(PYTHON) scripts/evaluate_absa.py
