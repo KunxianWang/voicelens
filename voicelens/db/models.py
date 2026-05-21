@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     JSON,
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -229,3 +230,45 @@ class ReviewCluster(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     cluster: Mapped[Cluster] = relationship("Cluster", back_populates="members")
+
+
+class Incident(Base):
+    """One detected anomaly: an issue cluster (or aspect) spiking in a week (M4B).
+
+    ``anomaly_flow`` builds weekly volume series over the clustered
+    negative mentions, computes an EWMA baseline + z-score, and writes
+    one ``Incident`` row per week that exceeds the thresholds.
+
+    ``granularity`` is ``"cluster"`` (``cluster_id`` set) or ``"aspect"``
+    (``cluster_id`` NULL — the sparse-data fallback). Writes are
+    idempotent on ``(granularity, cluster_id, aspect_code, week_start)``
+    within an ``(aspect_version, provider, model_name)`` scope.
+    """
+
+    __tablename__ = "incident"
+
+    STATUS_OPEN = "open"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    granularity: Mapped[str] = mapped_column(String(16), nullable=False, default="cluster")
+    aspect_version: Mapped[str] = mapped_column(String(16), nullable=False, default="v2")
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    cluster_id: Mapped[int | None] = mapped_column(
+        ForeignKey("cluster.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    aspect_code: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    cluster_label: Mapped[str | None] = mapped_column(String(255))
+    week_start: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    observed_volume: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    baseline_volume: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    z_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    severity_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    unique_review_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    avg_rating: Mapped[float | None] = mapped_column(Float)
+    example_quotes: Mapped[list | None] = mapped_column(JSON)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default=STATUS_OPEN)
+    opened_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)

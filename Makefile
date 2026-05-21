@@ -13,7 +13,7 @@
         tune-retrieval-hybrid embed-v2-1k-base evaluate-retrieval-dense-base \
         validate-retrieval-goldens-refined evaluate-retrieval-refined-lexical-first \
         tune-retrieval-hybrid-refined \
-        cluster-v2 cluster-stats \
+        cluster-v2 cluster-stats anomaly-v2 anomaly-stats \
         test lint install
 
 PYTHON ?= python
@@ -34,6 +34,11 @@ DENSE_WEIGHT ?= 0.25
 REFINED_GOLDENS ?= data/eval/retrieval_goldens_refined.jsonl
 # M4A clustering: minimum members for a cluster to be kept.
 CLUSTER_MIN_SIZE ?= 5
+# M4B anomaly detection knobs (MVP-friendly defaults for the 1k subset).
+ANOMALY_GRANULARITY ?= cluster
+ANOMALY_MIN_HISTORY ?= 3
+ANOMALY_Z_THRESHOLD ?= 2.0
+ANOMALY_MIN_VOLUME ?= 3
 
 help:
 	@echo "Targets:"
@@ -84,6 +89,8 @@ help:
 	@echo "  tune-retrieval-hybrid-refined        grid-tune fusion on refined goldens"
 	@echo "  cluster-v2               cluster negative v2 ABSA mentions into issue topics"
 	@echo "  cluster-stats            summarise the cluster table"
+	@echo "  anomaly-v2               detect weekly issue-spike incidents (EWMA z-score)"
+	@echo "  anomaly-stats            summarise the incident table"
 	@echo "  db-stats                 print review / brand / rating / DQ counts"
 	@echo "  test                     run pytest (uses SQLite in-memory)"
 	@echo "  lint                     ruff check"
@@ -340,6 +347,22 @@ cluster-v2:
 
 cluster-stats:
 	$(PYTHON) scripts/cluster_stats.py \
+	  --aspect-version "$(ABSA_ASPECT_VERSION)" \
+	  --provider "$(ABSA_LLM_PROVIDER)" \
+	  --model "$(ABSA_MODEL)"
+
+anomaly-v2:
+	$(PYTHON) -m voicelens.pipeline.flows.anomaly_flow \
+	  --aspect-version "$(ABSA_ASPECT_VERSION)" \
+	  --provider "$(ABSA_LLM_PROVIDER)" \
+	  --model "$(ABSA_MODEL)" \
+	  --granularity "$(ANOMALY_GRANULARITY)" \
+	  --min-history-weeks "$(ANOMALY_MIN_HISTORY)" \
+	  --z-threshold "$(ANOMALY_Z_THRESHOLD)" \
+	  --min-volume "$(ANOMALY_MIN_VOLUME)"
+
+anomaly-stats:
+	$(PYTHON) scripts/anomaly_stats.py \
 	  --aspect-version "$(ABSA_ASPECT_VERSION)" \
 	  --provider "$(ABSA_LLM_PROVIDER)" \
 	  --model "$(ABSA_MODEL)"

@@ -1546,8 +1546,93 @@ stores `topic_keywords`, `representative_review_ids` and
 - `review_cluster` — the membership join; one review appears once per
   aspect it was clustered under.
 
-M4B (anomaly detection) will run a time-series watch over these
-clusters; M4A only produces the static snapshot.
+M4B (anomaly detection) runs a time-series watch over these clusters;
+M4A only produces the static snapshot.
+
+---
+
+## Milestone 4B: Emerging-issue anomaly detection
+
+M4A answers *"what are customers complaining about right now?"* — a
+static snapshot. M4B answers the question that actually drives action:
+*"which complaint is **getting worse**?"* It runs an EWMA baseline over
+the weekly volume of each issue cluster and flags weeks that spike
+above their own recent history as **incidents**.
+
+### Why anomaly detection comes after clustering
+
+A spike is only meaningful against a unit. M4A defined that unit — the
+issue cluster — so M4B can ask "is *this cluster* spiking" rather than
+the far noisier "is *this aspect* spiking". Clustering also gives every
+incident a human-readable label and drill-down quotes for free.
+
+### How it works
+
+`anomaly_flow` (`voicelens/pipeline/flows/anomaly_flow.py`):
+
+1. **Event time** — each clustered negative mention is dated by its
+   review's `posted_at`, snapped to the **Monday** of its ISO week.
+2. **Weekly aggregation** — `aggregate_weekly` groups mentions into
+   `(series, week)` buckets. Two granularities: `cluster` (one series
+   per issue cluster — preferred) and `aspect` (one series per aspect —
+   the fallback when cluster-level weekly counts are too sparse to
+   baseline). Each bucket records `observed_volume`,
+   `severity_weighted_volume` (low/medium/high → **1 / 2 / 4**,
+   deliberately steeper than M4A's clustering weights), unique review
+   count, average rating and a few example quotes.
+3. **EWMA baseline + z-score** — per series, sorted by week:
+   - `baseline = EWMA` over the **previous** weeks only
+     (`alpha = 2 / (span + 1)`, `span = 4` by default) — the current
+     week never sits in its own baseline.
+   - `rolling_std` = sample std over the previous weeks
+     (`rolling_window = 8`, expanding when 0).
+   - `z = (observed − baseline) / max(std, min_std)`, with
+     `min_std = 1.0` flooring the denominator so a near-flat history
+     cannot produce an explosive z.
+4. **Flag** — a week becomes an incident when **all** of:
+   `z ≥ z_threshold` (2.0), `observed_volume ≥ min_volume` (3) and
+   `severity_weighted_volume ≥ min_severity_score` (5.0). A series
+   needs at least `min_history_weeks` (3) of prior weeks before any of
+   its weeks can be flagged — this kills tiny one-off spikes.
+5. **Summary** — each incident gets a **deterministic** one-line
+   summary (no LLM), e.g. *"Reliability complaints in cluster 'stopped
+   working after short use' spiked to 12 mentions during week
+   2024-03-18, above EWMA baseline 3.1 (z=2.8). Representative quote:
+   ..."*.
+6. **Persist** — incidents land in the `incident` table. Re-runs are
+   idempotent per `(aspect_version, provider, model_name, granularity)`:
+   the prior run's rows are cleared first, and each write goes through
+   `upsert_incident`, idempotent on the natural key
+   `(granularity, cluster_id, aspect_code, week_start)`.
+
+### Run it
+
+```bash
+make anomaly-v2      # python -m voicelens.pipeline.flows.anomaly_flow ...
+make anomaly-stats   # summarise the incident table
+```
+
+Tune with `ANOMALY_GRANULARITY` (default `cluster`), `ANOMALY_MIN_HISTORY`
+(3), `ANOMALY_Z_THRESHOLD` (2.0) and `ANOMALY_MIN_VOLUME` (3). All
+detection thresholds are also flow / CLI arguments.
+
+### How to read an incident
+
+`anomaly-stats` prints total incidents, incidents per aspect, and the
+top incidents by `severity_score` — each with its week, cluster label,
+observed vs baseline volume, z-score and example quotes. A high
+`observed_volume` with a low `baseline_volume` and `z ≥ 2` is a genuine
+emerging issue; the deterministic `summary` field is what a dashboard
+or alert would surface verbatim.
+
+### Limitation: the sparse 1k subset
+
+Series are built from **observed weeks only** — calendar gaps are not
+zero-filled. On the 1k ABSA subset (≈1.1k clustered mentions spread
+thin across 2015–2017), zero-filling every quiet week would make any
+busy week look anomalous. Cluster-level weekly counts are therefore
+sparse; `--granularity aspect` is the denser fallback. Proper
+gap-aware baselining is deferred until the full MVP subset is processed.
 
 ---
 
@@ -1555,7 +1640,6 @@ clusters; M4A only produces the static snapshot.
 
 - Real-LLM ABSA over the full 245k MVP subset.
 - LLM-generated cluster labels (M4A uses offline TF-IDF labels).
-- EWMA anomaly detection (Milestone 4B).
 - LangGraph agent / RAG query layer.
 - Streamlit dashboard.
 
