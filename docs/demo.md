@@ -111,8 +111,37 @@ Run these on the **Retrieval Search** page (hybrid mode):
 3. `expensive not worth the price`
 
 Each should return reviews whose evidence quotes clearly match the
-query intent — a quick, honest illustration of hybrid retrieval without
-any LLM answer generation.
+query intent — a quick, honest illustration of hybrid retrieval.
+
+---
+
+## 5b. Optional final step — cited answer (M6A beta)
+
+On the **Retrieval Search** page, after running a search, scroll to the
+**Answer Generator (Beta)** section:
+
+1. Search for: `product stopped working after a week`.
+2. Leave the answer provider on `mock` (offline — no API key needed).
+3. Click **Generate cited answer**.
+4. A short answer appears above the raw results, with every claim
+   marked `[1]`, `[2]` … and an expandable citations list mapping each
+   marker to a real retrieved review and its evidence quote.
+
+The same thing from the CLI:
+
+```bash
+make ask-voicelens
+# or, explicitly:
+python scripts/ask_voicelens.py \
+  --question "What are the main reliability complaints?" \
+  --aspect reliability --sentiment negative --provider mock
+```
+
+> *Talking point:* "This is a citation-grounded answer generator — every
+> claim is bound to a retrieved review, unsupported citations are
+> stripped, and an unanswerable query returns 'insufficient evidence'
+> instead of hallucinating. It is deliberately *not* an agent yet: no
+> planner, no memory, no tools — that is the next milestone."
 
 ---
 
@@ -126,13 +155,14 @@ any LLM answer generation.
   flows are idempotent and orchestrated with Prefect.
 - **Evaluation is real:** ABSA holdout macro-F1 0.71, Cohen's κ 0.93,
   evidence-verbatim rate 1.0; refined retrieval Hit@5 0.96, Recall@20
-  0.89, MRR@10 0.85. 350 automated tests, lint clean.
+  0.89, MRR@10 0.85. 371 automated tests, lint clean.
 - **Honesty:** the full 245k ABSA pass is **not** done — ABSA ran on a
   controlled 1k batch to keep LLM cost bounded while proving the
   pipeline and the eval harness. The architecture supports scaling it.
-- **Scope discipline:** the RAG agent / LangGraph layer is designed
-  (see the main README §11) but deliberately not built yet — the
-  retrieval page is search-only.
+- **Scope discipline:** the answer generator (M6A) is a single
+  retrieve-then-answer pass with citation guardrails — *not* an agent.
+  The LangGraph planner / memory / tool routing is designed (main
+  README §11) but deliberately not built yet.
 
 ---
 
@@ -141,8 +171,8 @@ any LLM answer generation.
 - ABSA coverage is a 1k batch, not the full loaded corpus.
 - Cluster-level anomaly signal is sparse on the 1k subset; the
   incidents page exposes an aspect-level fallback granularity.
-- Retrieval is search-only — no LLM answer generation (a later
-  milestone).
+- The answer generator (M6A) is one retrieve-then-answer pass — no
+  planner, no memory, no tool routing (those are a later milestone).
 - Single-locale (English), Amazon-only, 7-aspect ontology.
 - Local-first: no deployment, no auth, no live marketplace integration.
 

@@ -1696,10 +1696,93 @@ read-only Postgres queries; `components.py` holds shared widgets;
 ### Notes
 
 - The dashboard reads existing pipeline outputs only — it does **not**
-  re-run any flow and does **not** call a real LLM.
-- The retrieval page is a search demo, not the final RAG query layer.
+  re-run any flow.
 - Cluster-level incident signal is sparse on the 1k subset, so the
   incidents page exposes the aspect-level fallback granularity too.
+- The retrieval page now also offers a beta answer generator (M6A) —
+  see below.
+
+---
+
+## Milestone 6A: Citation-grounded answer generation
+
+M3 built hybrid retrieval; M5 surfaced it as a search page. M6A adds
+the smallest useful layer on top: given a question and the reviews the
+retriever returned, generate a concise analyst answer whose every claim
+is bound to a numbered citation `[1]`, `[2]` … into those reviews.
+
+### What it is — and what it deliberately is not
+
+It is a single **retrieve-then-answer** pass. It is **not** an agent:
+
+- no planner / query decomposition,
+- no tool routing (no "RAG vs SQL" branch),
+- no memory,
+- no autonomous actions.
+
+Those are later milestones (main README §8 / §11). M6A is the grounding
++ guardrail core they would eventually sit on.
+
+### How it works
+
+`voicelens/rag/`:
+
+- `citations.py` — `build_citations(hits)` maps retrieval `SearchHit`s
+  to numbered `Citation` objects (review_id, source_id, brand, asin,
+  rating, aspect_codes, evidence_quote, text_snippet, retrieval_score).
+- `prompts.py` — a strict system prompt: answer only from the numbered
+  evidence, cite every claim, never invent numbers, and emit the
+  `INSUFFICIENT_EVIDENCE` sentinel when the evidence does not support
+  an answer.
+- `providers.py` — `MockAnswerProvider` (deterministic, offline — used
+  by tests and demos) and `LLMAnswerProvider` (OpenAI / Anthropic, same
+  HTTP shape and `*_BASE_URL` overrides as the ABSA provider).
+- `answer.py` — `generate_answer(question, hits, *, provider)` is the
+  orchestrator. It builds citations, calls the provider, then
+  **verifies** the output: citation markers that do not map to a
+  retrieved review are stripped from the answer and recorded in
+  `guardrail_flags`; the insufficient-evidence path is made explicit.
+
+The provider / model are resolved from `RAG_PROVIDER` (`mock` default)
+and `RAG_MODEL`; API keys are read from the environment and never
+logged. Tests only ever use the mock provider.
+
+### Run it
+
+```bash
+# CLI — retrieve + cited answer for one question
+make ask-voicelens                       # uses ASK_QUESTION / RAG_PROVIDER vars
+python scripts/ask_voicelens.py \
+  --question "What are customers saying about products that stopped working?" \
+  --mode hybrid --aspect reliability --sentiment negative \
+  --top-k 8 --provider mock
+
+# Smoke test — 5 fixed questions + 1 nonsense query
+make rag-smoke                            # RAG_PROVIDER=mock by default
+```
+
+`make rag-smoke` checks, for every real question, that the answer has a
+non-empty citation set, that every cited review_id came from the
+retrieved results, and that no unsupported citation markers survive;
+and that the nonsense query is reported as insufficient evidence.
+
+### Dashboard answer beta
+
+The **Retrieval Search** page gained an *Answer Generator (Beta)*
+section: run a search, pick an answer provider, click **Generate cited
+answer**. The cited answer appears above the raw results with an
+expandable citations list. The provider selector defaults to `mock`
+(offline); choosing `anthropic` / `openai` without a configured API key
+shows a friendly message pointing back to `mock` — it never crashes.
+
+### Limitations
+
+- No planner — one retrieve-then-answer pass, no query decomposition.
+- No multi-step routing — no "answer from SQL vs from RAG" branch.
+- No memory — each question is independent.
+- Answer quality with the mock provider is intentionally literal (it
+  surfaces evidence rather than paraphrasing); use a real provider for
+  fluent answers.
 
 ---
 
@@ -1707,7 +1790,7 @@ read-only Postgres queries; `components.py` holds shared widgets;
 
 - Real-LLM ABSA over the full 245k MVP subset.
 - LLM-generated cluster labels (M4A uses offline TF-IDF labels).
-- LangGraph agent / RAG query layer.
-- LLM answer generation on the retrieval page (M5A is search-only).
+- LangGraph planner / agent, tool routing, and memory (M6A is a single
+  retrieve-then-answer pass, not an agent).
 
 These are scoped to the next milestones. See `design/04-mvp-spec.md` §7 for the week-by-week plan.

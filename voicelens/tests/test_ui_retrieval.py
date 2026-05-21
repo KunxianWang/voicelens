@@ -18,7 +18,7 @@ from voicelens.retrieval.qdrant_index import (
     ensure_collection,
     upsert_points,
 )
-from voicelens.ui.pages.retrieval import RetrievalBackends, run_search
+from voicelens.ui.pages.retrieval import RetrievalBackends, run_answer, run_search
 
 _DIM = 32
 
@@ -119,3 +119,26 @@ def test_search_empty_result_is_graceful(backends):
         "STOPPED working", backends=backends, mode="lexical", brand="NoSuchBrand"
     )
     assert hits == []
+
+
+# ---- answer-generator beta ---------------------------------------------
+
+
+def test_run_answer_dashboard_helper_with_mock_provider(backends):
+    """The dashboard answer-beta helper works without any real API key."""
+    hits = run_search("STOPPED working", backends=backends, top_k=3)
+    assert hits  # precondition
+    result = run_answer("What are the reliability complaints?", hits, provider="mock")
+    assert result.provider == "mock"
+    assert result.citations
+    assert all(
+        c.review_id in {h.review_id for h in hits} for c in result.citations
+    )
+    assert result.guardrail_flags["unsupported_citations"] == []
+
+
+def test_run_answer_handles_no_hits_gracefully(backends):  # noqa: ARG001
+    """An empty hit list yields an insufficient-evidence answer, not a crash."""
+    result = run_answer("anything", [], provider="mock")
+    assert result.insufficient_evidence is True
+    assert result.citations == []

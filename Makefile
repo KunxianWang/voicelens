@@ -15,6 +15,7 @@
         tune-retrieval-hybrid-refined \
         cluster-v2 cluster-stats anomaly-v2 anomaly-stats \
         dashboard dashboard-dev demo-healthcheck \
+        ask-voicelens rag-smoke \
         test lint install
 
 PYTHON ?= python
@@ -40,6 +41,12 @@ ANOMALY_GRANULARITY ?= cluster
 ANOMALY_MIN_HISTORY ?= 3
 ANOMALY_Z_THRESHOLD ?= 2.0
 ANOMALY_MIN_VOLUME ?= 3
+# M6A citation-grounded answer generator. Defaults to the offline mock
+# provider; set RAG_PROVIDER=anthropic|openai (with a key) for a real run.
+RAG_PROVIDER ?= mock
+ASK_QUESTION ?= What are customers saying about products that stopped working?
+ASK_MODE ?= hybrid
+ASK_TOP_K ?= 8
 
 help:
 	@echo "Targets:"
@@ -95,6 +102,8 @@ help:
 	@echo "  dashboard                launch the Streamlit analytics dashboard"
 	@echo "  dashboard-dev            launch the dashboard with auto-reload on save"
 	@echo "  demo-healthcheck         verify Postgres / Qdrant / dashboard are demo-ready"
+	@echo "  ask-voicelens            ask a question -> retrieve + citation-grounded answer"
+	@echo "  rag-smoke                smoke-test the answer generator (5 questions)"
 	@echo "  db-stats                 print review / brand / rating / DQ counts"
 	@echo "  test                     run pytest (uses SQLite in-memory)"
 	@echo "  lint                     ruff check"
@@ -379,6 +388,16 @@ dashboard-dev:
 
 demo-healthcheck:
 	$(PYTHON) scripts/demo_healthcheck.py
+
+ask-voicelens:
+	$(PYTHON) scripts/ask_voicelens.py \
+	  --question "$(ASK_QUESTION)" \
+	  --mode "$(ASK_MODE)" \
+	  --top-k "$(ASK_TOP_K)" \
+	  --provider "$(RAG_PROVIDER)"
+
+rag-smoke:
+	$(PYTHON) scripts/evaluate_rag_smoke.py --provider "$(RAG_PROVIDER)"
 
 evaluate-absa:
 	$(PYTHON) scripts/evaluate_absa.py

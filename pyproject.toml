@@ -74,6 +74,7 @@ ignore = ["E501"]
 # script modules, which necessitates imports below a statement.
 "scripts/export_retrieval_review_candidates.py" = ["E402"]
 "scripts/tune_retrieval_hybrid.py" = ["E402"]
+"scripts/evaluate_rag_smoke.py" = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["voicelens/tests"]
