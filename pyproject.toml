@@ -44,6 +44,12 @@ analytics = [
     # and is used only when separately installed.
     "scikit-learn>=1.4",
 ]
+dashboard = [
+    # M5A Streamlit analytics dashboard. Kept as an optional extra so
+    # the base install and CI test path stay free of streamlit's heavy
+    # dependency tree (pyarrow, altair, tornado).
+    "streamlit>=1.40",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

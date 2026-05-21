@@ -1636,11 +1636,72 @@ gap-aware baselining is deferred until the full MVP subset is processed.
 
 ---
 
+## Milestone 5A: Streamlit analytics dashboard
+
+M2–M4 produced data: ABSA mentions, a retrieval index, issue clusters,
+anomaly incidents. M5A makes that data *legible* — a local-first
+Streamlit dashboard that visualises every pipeline output in one place.
+It is **read-only**: it never writes to Postgres, never calls a real
+LLM, and is **not** the final RAG layer.
+
+### Required infra
+
+```bash
+make up            # Postgres + Qdrant containers
+make init-db       # only if the schema is not yet created
+make dashboard     # streamlit run voicelens/ui/app.py
+```
+
+`make dashboard` needs the `dashboard` extra (`pip install -e .[dashboard]`,
+brings in streamlit). `make dashboard-dev` adds auto-reload on save. The
+retrieval page additionally needs the Qdrant index (`make embed-v2-1k`)
+and the `retrieval` extra; every page degrades to an empty state if its
+data is missing rather than crashing.
+
+### The six pages
+
+`voicelens/ui/` — `app.py` wires six `st.Page`s; `db.py` holds the
+read-only Postgres queries; `components.py` holds shared widgets;
+`pages/` holds one module per page, each exposing a `render()`.
+
+1. **Overview** — headline counts (reviews, ABSA-processed, mentions,
+   clusters, incidents, Qdrant points) plus reviews-by-brand, ABSA
+   status, aspect and sentiment distribution charts.
+2. **ABSA Distribution** — aspect × sentiment matrix, severity
+   distribution for negatives, negative examples with evidence quotes,
+   and a reliability spotlight (the dominant quality signal). Filterable
+   by brand / aspect / sentiment / severity / rating range.
+3. **Issue Clusters** — M4A clusters ranked by severity-weighted size,
+   with drill-down into a cluster's keywords, representative quotes and
+   member reviews.
+4. **Emerging Incidents** — M4B anomaly incidents ranked by severity
+   score, with the deterministic pipeline summary, observed vs baseline
+   volume, z-score and representative quotes. Filterable by aspect and
+   by granularity (cluster-level / aspect-level fallback).
+5. **Retrieval Search** — a **search-only** demo over the Qdrant index:
+   query + mode (`hybrid` / `dense` / `lexical`, default `hybrid` /
+   `rrf_equal`) + brand / aspect / sentiment / rating filters. Shows
+   ranked reviews with scores, aspects and quotes. No LLM answer
+   generation — that is a later milestone.
+6. **Data Quality** — ingest-run summaries, DQ pass/fail counts,
+   failures by reason, ABSA status distribution and the processed /
+   mention coverage rates plus LLM-batch failed/invalid rates.
+
+### Notes
+
+- The dashboard reads existing pipeline outputs only — it does **not**
+  re-run any flow and does **not** call a real LLM.
+- The retrieval page is a search demo, not the final RAG query layer.
+- Cluster-level incident signal is sparse on the 1k subset, so the
+  incidents page exposes the aspect-level fallback granularity too.
+
+---
+
 ## Not yet implemented (intentionally)
 
 - Real-LLM ABSA over the full 245k MVP subset.
 - LLM-generated cluster labels (M4A uses offline TF-IDF labels).
 - LangGraph agent / RAG query layer.
-- Streamlit dashboard.
+- LLM answer generation on the retrieval page (M5A is search-only).
 
 These are scoped to the next milestones. See `design/04-mvp-spec.md` §7 for the week-by-week plan.

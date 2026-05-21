@@ -14,6 +14,7 @@
         validate-retrieval-goldens-refined evaluate-retrieval-refined-lexical-first \
         tune-retrieval-hybrid-refined \
         cluster-v2 cluster-stats anomaly-v2 anomaly-stats \
+        dashboard dashboard-dev \
         test lint install
 
 PYTHON ?= python
@@ -91,6 +92,8 @@ help:
 	@echo "  cluster-stats            summarise the cluster table"
 	@echo "  anomaly-v2               detect weekly issue-spike incidents (EWMA z-score)"
 	@echo "  anomaly-stats            summarise the incident table"
+	@echo "  dashboard                launch the Streamlit analytics dashboard"
+	@echo "  dashboard-dev            launch the dashboard with auto-reload on save"
 	@echo "  db-stats                 print review / brand / rating / DQ counts"
 	@echo "  test                     run pytest (uses SQLite in-memory)"
 	@echo "  lint                     ruff check"
@@ -366,6 +369,12 @@ anomaly-stats:
 	  --aspect-version "$(ABSA_ASPECT_VERSION)" \
 	  --provider "$(ABSA_LLM_PROVIDER)" \
 	  --model "$(ABSA_MODEL)"
+
+dashboard:
+	$(PYTHON) -m streamlit run voicelens/ui/app.py
+
+dashboard-dev:
+	$(PYTHON) -m streamlit run voicelens/ui/app.py --server.runOnSave true
 
 evaluate-absa:
 	$(PYTHON) scripts/evaluate_absa.py
