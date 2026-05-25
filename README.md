@@ -1,10 +1,5 @@
 # VoiceLens — VoC Data Engineering & Analytics Platform for Cross-Border E-commerce
 
-> Ingests, normalizes, and analyzes hundreds of thousands of multilingual customer reviews for consumer-electronics brands (Anker-class, Soundcore, Eufy archetype) selling across Amazon and other marketplaces. Surfaces emerging quality issues, aspect-level sentiment trends, competitor mentions, and anomaly alerts — exposed through a dashboard and an agentic-RAG query layer.
-
-> **Current focus = 4–6 week MVP**, scope locked in [`design/04-mvp-spec.md`](design/04-mvp-spec.md). This README leads with the MVP; the bigger target architecture is documented at the end (§11) and in [`design/`](design/) as the planned extension surface.
-
----
 
 ## 1. Project Summary
 
